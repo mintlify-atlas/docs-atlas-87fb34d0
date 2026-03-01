@@ -1,0 +1,163 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Subsquid Pipes SDK",
+  "projectDescription": "TypeScript-first toolkit for streaming blockchain data, transforming it in-flight, and delivering results to your own systems.",
+  "theme": "aspen",
+  "primaryColor": "#FF6B35",
+  "lightColor": "#FFB4A2",
+  "darkColor": "#CC5528",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "core/pipelines",
+              "core/sources",
+              "core/transformers",
+              "core/targets",
+              "core/fork-handling"
+            ]
+          },
+          {
+            "group": "EVM",
+            "pages": [
+              "evm/overview",
+              "evm/portal-source",
+              "evm/decoder",
+              "evm/factory-contracts",
+              "evm/query-builder"
+            ]
+          },
+          {
+            "group": "Solana",
+            "pages": [
+              "solana/overview",
+              "solana/portal-source",
+              "solana/instruction-decoder",
+              "solana/query-builder"
+            ]
+          },
+          {
+            "group": "Hyperliquid",
+            "pages": [
+              "hyperliquid/overview",
+              "hyperliquid/fills-source"
+            ]
+          },
+          {
+            "group": "Targets",
+            "pages": [
+              "targets/overview",
+              "targets/clickhouse",
+              "targets/drizzle",
+              "targets/custom"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/logging",
+              "observability/profiling",
+              "observability/metrics"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/portal-cache",
+              "advanced/composite-transformers",
+              "advanced/progress-tracking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/portal-source",
+              "api/transformer",
+              "api/target",
+              "api/types"
+            ]
+          },
+          {
+            "group": "EVM API",
+            "pages": [
+              "api/evm/portal-source",
+              "api/evm/decoder",
+              "api/evm/factory",
+              "api/evm/query-builder"
+            ]
+          },
+          {
+            "group": "Solana API",
+            "pages": [
+              "api/solana/portal-source",
+              "api/solana/instruction-decoder",
+              "api/solana/query-builder"
+            ]
+          },
+          {
+            "group": "Hyperliquid API",
+            "pages": [
+              "api/hyperliquid/fills-source",
+              "api/hyperliquid/query-builder"
+            ]
+          },
+          {
+            "group": "Targets API",
+            "pages": [
+              "api/targets/clickhouse",
+              "api/targets/drizzle"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Stream blockchain data from Subsquid Portal datasets for EVM, Solana, and Hyperliquid chains",
+    "Strongly-typed event decoders with ABI support for EVM contracts",
+    "Factory contract pattern support for dynamic contract tracking",
+    "Built-in targets for ClickHouse and PostgreSQL with Drizzle ORM",
+    "Fork-aware processing with automatic rollback handling",
+    "Composable pipeline architecture via pipe() helper",
+    "Profiling, structured logging, and Prometheus metrics",
+    "Portal caching for improved performance"
+  ],
+  "publicApiSurface": [
+    "portalSource()",
+    "createTransformer()",
+    "createTarget()",
+    "evmPortalSource()",
+    "evmDecoder()",
+    "evmQueryBuilder()",
+    "solanaPortalSource()",
+    "solanaInstructionDecoder()",
+    "solanaQueryBuilder()",
+    "hyperliquidFillsPortalSource()",
+    "hyperliquidFillsQueryBuilder()",
+    "createClickhouseTarget()",
+    "createDrizzleTarget()",
+    "createLogger()",
+    "createMetricsServer()",
+    "createProfiler()",
+    "Factory",
+    "PortalCache",
+    "commonAbis"
+  ]
+}
