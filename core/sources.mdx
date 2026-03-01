@@ -179,9 +179,9 @@ evmPortalSource({
 Expose Prometheus metrics:
 
 ```typescript
-import { createMetricsServer } from '@subsquid/pipes/core'
+import { metricsServer } from '@subsquid/pipes/metrics/node'
 
-const metrics = createMetricsServer({ port: 3000 })
+const metrics = metricsServer({ port: 3000 })
 
 evmPortalSource({
   portal: '...',
@@ -455,10 +455,10 @@ source.pipe({
 
 ```typescript
 import pino from 'pino'
-import { createMetricsServer } from '@subsquid/pipes/core'
+import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 const logger = pino({ level: 'info' })
-const metrics = createMetricsServer({ port: 3000 })
+const metrics = metricsServer({ port: 3000 })
 
 const source = evmPortalSource({
   portal: {
