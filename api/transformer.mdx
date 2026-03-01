@@ -1,0 +1,390 @@
+---
+title: 'Transformer'
+description: 'Transform and process Portal data batches'
+---
+
+## Overview
+
+Transformers allow you to process and transform data as it flows through the Pipeline. They support lifecycle hooks for initialization, cleanup, and fork handling.
+
+## createTransformer()
+
+Factory function to create a new transformer instance.
+
+```typescript
+function createTransformer<In, Out, Query = any>(
+  options: TransformerOptions<In, Out, Query>
+): Transformer<In, Out, Query>
+```
+
+<ParamField path="options" type="TransformerOptions<In, Out, Query>" required>
+  Transformer configuration
+
+  <ParamField path="profiler" type="ProfilerOptions">
+    Profiler configuration for performance tracking
+    
+    <ParamField path="id" type="string">
+      Unique identifier for the transformer (used in profiling and logs)
+    </ParamField>
+  </ParamField>
+
+  <ParamField path="query" type="(ctx: QueryCtx<Query>) => void | Promise<void>">
+    Hook called during query configuration phase. Use to modify the query builder before data fetching starts.
+    
+    ```typescript
+    query: async (ctx) => {
+      // Add fields to the query
+      ctx.queryBuilder.addFields({ transaction: { hash: true } })
+    }
+    ```
+  </ParamField>
+
+  <ParamField path="start" type="(ctx: StartCtx) => void | Promise<void>">
+    Hook called once before processing begins. Use for initialization tasks like database connections.
+    
+    ```typescript
+    start: async (ctx) => {
+      await database.connect()
+      ctx.logger.info('Database connected')
+    }
+    ```
+  </ParamField>
+
+  <ParamField path="transform" type="(data: In, ctx: BatchCtx) => Out | Promise<Out>" required>
+    Main transformation function called for each batch.
+    
+    ```typescript
+    transform: (data, ctx) => {
+      return data.blocks.map(block => ({
+        number: block.header.number,
+        timestamp: block.header.timestamp,
+      }))
+    }
+    ```
+  </ParamField>
+
+  <ParamField path="fork" type="(cursor: BlockCursor, ctx: Ctx) => void | Promise<void>">
+    Hook called when a blockchain fork is detected. Use to rollback state to the given cursor.
+    
+    ```typescript
+    fork: async (cursor, ctx) => {
+      await database.rollbackTo(cursor.number)
+      ctx.logger.warn(`Rolled back to block ${cursor.number}`)
+    }
+    ```
+  </ParamField>
+
+  <ParamField path="stop" type="(ctx: StopCtx) => void | Promise<void>">
+    Hook called when processing stops. Use for cleanup tasks like closing connections.
+    
+    ```typescript
+    stop: async (ctx) => {
+      await database.disconnect()
+      ctx.logger.info('Database disconnected')
+    }
+    ```
+  </ParamField>
+</ParamField>
+
+<ResponseField name="return" type="Transformer<In, Out, Query>">
+  A new Transformer instance
+</ResponseField>
+
+## Transformer Class
+
+### Constructor
+
+```typescript
+new Transformer<In, Out, Query = any>(options: TransformerOptions<In, Out, Query>)
+```
+
+### Methods
+
+#### pipe()
+
+Chain another transformer to this one.
+
+```typescript
+pipe<Res>(
+  transformer:
+    | Transformer<Out, Res, Query>
+    | TransformerOptions<Out, Res, Query>
+    | TransformerOptions<Out, Res, Query>['transform']
+): Transformer<In, Res, Query>
+```
+
+<ParamField path="transformer" required>
+  Can be:
+  - A Transformer instance
+  - A TransformerOptions object
+  - A transform function
+</ParamField>
+
+<ResponseField name="return" type="Transformer<In, Res, Query>">
+  A new transformer that applies both transformations in sequence
+</ResponseField>
+
+#### id()
+
+Get the transformer's identifier.
+
+```typescript
+id(): string
+```
+
+<ResponseField name="return" type="string">
+  The transformer's ID (from profiler options, or "anonymous")
+</ResponseField>
+
+#### setId()
+
+Set the transformer's identifier.
+
+```typescript
+setId(profilerId: string): void
+```
+
+<ParamField path="profilerId" type="string" required>
+  New identifier for the transformer
+</ParamField>
+
+## Context Types
+
+### QueryCtx
+
+Context provided to the `query` hook.
+
+```typescript
+type QueryCtx<Query> = {
+  queryBuilder: Query
+  portal: PortalClient
+  logger: Logger
+}
+```
+
+<ResponseField name="queryBuilder" type="Query">
+  Query builder instance to modify
+</ResponseField>
+
+<ResponseField name="portal" type="PortalClient">
+  Portal client for metadata queries
+</ResponseField>
+
+<ResponseField name="logger" type="Logger">
+  Logger instance
+</ResponseField>
+
+### StartCtx
+
+Context provided to the `start` hook.
+
+```typescript
+type StartCtx = {
+  state: {
+    current?: BlockCursor
+    initial: number
+  }
+  logger: Logger
+  metrics: Metrics
+}
+```
+
+<ResponseField name="state" type="object">
+  Initial state information
+  
+  <ResponseField name="current" type="BlockCursor">
+    Current cursor position (if resuming)
+  </ResponseField>
+  
+  <ResponseField name="initial" type="number">
+    Initial block number where processing starts
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="logger" type="Logger">
+  Logger instance
+</ResponseField>
+
+<ResponseField name="metrics" type="Metrics">
+  Metrics collector
+</ResponseField>
+
+### StopCtx
+
+Context provided to the `stop` hook.
+
+```typescript
+type StopCtx = {
+  logger: Logger
+}
+```
+
+<ResponseField name="logger" type="Logger">
+  Logger instance
+</ResponseField>
+
+## Examples
+
+### Simple Transform Function
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const extractHeaders = createTransformer({
+  profiler: { id: 'extract-headers' },
+  transform: (data) => {
+    return data.blocks.map(block => block.header)
+  },
+})
+```
+
+### With Lifecycle Hooks
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+import { Database } from './database'
+
+let db: Database
+
+const saveToDatabase = createTransformer({
+  profiler: { id: 'save-to-db' },
+  
+  async start(ctx) {
+    db = new Database()
+    await db.connect()
+    ctx.logger.info('Database connected')
+    
+    // Resume from last saved block if available
+    const lastBlock = await db.getLastBlock()
+    if (lastBlock && ctx.state.current) {
+      ctx.logger.info(`Resuming from block ${lastBlock.number}`)
+    }
+  },
+  
+  async transform(data, ctx) {
+    // Save blocks to database
+    await db.saveBlocks(data.blocks)
+    
+    ctx.logger.debug(`Saved ${data.blocks.length} blocks`)
+    
+    return data // Pass through unchanged
+  },
+  
+  async fork(cursor, ctx) {
+    // Handle blockchain reorganization
+    await db.rollbackTo(cursor.number)
+    ctx.logger.warn(`Rolled back to block ${cursor.number} due to fork`)
+  },
+  
+  async stop(ctx) {
+    await db.disconnect()
+    ctx.logger.info('Database disconnected')
+  },
+})
+```
+
+### Chaining Transformers
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const pipeline = createTransformer({
+  profiler: { id: 'extract-blocks' },
+  transform: (data) => data.blocks,
+})
+  .pipe({
+    profiler: { id: 'filter-with-txs' },
+    transform: (blocks) => blocks.filter(b => b.transactions.length > 0),
+  })
+  .pipe({
+    profiler: { id: 'extract-transactions' },
+    transform: (blocks) => blocks.flatMap(b => b.transactions),
+  })
+  .pipe({
+    profiler: { id: 'deduplicate' },
+    transform: (txs) => {
+      const seen = new Set()
+      return txs.filter(tx => {
+        if (seen.has(tx.hash)) return false
+        seen.add(tx.hash)
+        return true
+      })
+    },
+  })
+
+// Use in a source
+source.pipe(pipeline)
+```
+
+### Stateful Transformer
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const cache = new Map<string, any>()
+
+const cachingTransformer = createTransformer({
+  profiler: { id: 'caching' },
+  
+  async start(ctx) {
+    // Load cache from disk on startup
+    const saved = await loadCacheFromDisk()
+    for (const [key, value] of Object.entries(saved)) {
+      cache.set(key, value)
+    }
+    ctx.logger.info(`Loaded ${cache.size} cached items`)
+  },
+  
+  transform: (data, ctx) => {
+    return data.map(item => {
+      const cached = cache.get(item.id)
+      if (cached) {
+        return { ...item, ...cached }
+      }
+      
+      // Compute and cache
+      const enriched = enrichData(item)
+      cache.set(item.id, enriched)
+      
+      return { ...item, ...enriched }
+    })
+  },
+  
+  async fork(cursor, ctx) {
+    // Clear cache on fork to ensure consistency
+    cache.clear()
+    ctx.logger.info('Cache cleared due to fork')
+  },
+  
+  async stop(ctx) {
+    // Save cache to disk on shutdown
+    await saveCacheToDisk(Object.fromEntries(cache))
+    ctx.logger.info(`Saved ${cache.size} cached items`)
+  },
+})
+```
+
+### Query Modification
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const ensureTimestamps = createTransformer({
+  profiler: { id: 'with-timestamps' },
+  
+  query: (ctx) => {
+    // Ensure timestamp field is included in the query
+    ctx.queryBuilder.addFields({
+      block: { timestamp: true },
+    })
+  },
+  
+  transform: (data) => {
+    // Transform knowing timestamps are available
+    return data.blocks.map(block => ({
+      number: block.header.number,
+      timestamp: new Date(block.header.timestamp * 1000),
+    }))
+  },
+})
+```

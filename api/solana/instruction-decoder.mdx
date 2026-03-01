@@ -1,0 +1,273 @@
+---
+title: 'solanaInstructionDecoder()'
+description: 'Decodes Solana instructions using ABI definitions and filters by program ID and discriminators'
+---
+
+## Overview
+
+Creates a transformer that decodes raw Solana instructions into typed data structures using ABI instruction definitions. This function filters instructions by program ID and instruction discriminators, then decodes matching instructions with their associated transaction context.
+
+## Function Signature
+
+```typescript
+function solanaInstructionDecoder<T extends Instructions>(
+  options: {
+    range: PortalRange
+    programId: string | string[]
+    instructions: InstructionsArgs<T>
+    profiler?: ProfilerOptions
+    onError?: (ctx: BatchCtx, error: any) => unknown | Promise<unknown>
+  }
+): SolanaTransformer<SolanaPortalData<typeof decodedEventFields>, EventResponse<T>>
+```
+
+## Parameters
+
+<ParamField path="range" type="PortalRange" required>
+  The block range to process instructions from.
+  
+  **Example:** `{ from: 371602677 }` or `{ from: '371,602,677', to: '372,000,000' }`
+</ParamField>
+
+<ParamField path="programId" type="string | string[]" required>
+  Solana program ID(s) to filter instructions. Can be a single program ID or an array of program IDs.
+  
+  **Example:** `"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"` or `["program1...", "program2..."]`
+</ParamField>
+
+<ParamField path="instructions" type="InstructionsArgs<T>" required>
+  A record mapping instruction names to their ABI definitions. Each instruction must have:
+  - At least one discriminator field (`d1`, `d2`, `d4`, or `d8`)
+  - A `decode()` method that transforms raw instruction data into typed format
+  
+  **Example:**
+  ```typescript
+  {
+    swap: abi.instructions.Swap,
+    initializeConfig: abi.instructions.InitializeConfig
+  }
+  ```
+</ParamField>
+
+<ParamField path="profiler" type="ProfilerOptions">
+  Profiling configuration for performance monitoring.
+  
+  **Default:** `{ id: 'instruction decoder' }`
+  
+  **Properties:**
+  - `id: string` - Identifier for the profiler
+</ParamField>
+
+<ParamField path="onError" type="(ctx: BatchCtx, error: any) => unknown | Promise<unknown>">
+  Error handler for instruction decoding failures. By default, errors are thrown.
+  
+  Use this to implement custom error handling logic, such as logging and continuing processing.
+  
+  **Example:**
+  ```typescript
+  onError: (ctx, error) => {
+    console.error('Failed to decode instruction:', error)
+    // Continue processing
+  }
+  ```
+</ParamField>
+
+## Return Value
+
+Returns a `SolanaTransformer` that transforms `SolanaPortalData` into `EventResponse<T>`.
+
+**Type Definitions:**
+```typescript
+type EventResponse<T extends Instructions> = {
+  [K in keyof T]: AbiDecodeInstruction<T[K]>[]
+}
+
+type DecodedInstruction<D> = {
+  instruction: D
+  programId: string
+  blockNumber: number
+  timestamp: Date
+  transaction: Transaction<SelectedFields['transaction']>
+  innerInstructions: Instruction<SelectedFields['instruction']>[]
+  rawInstruction: Instruction<SelectedFields['instruction']>
+  tokenBalances: TokenBalance<SelectedFields['tokenBalance']>[]
+}
+```
+
+## Examples
+
+### Basic Usage with Orca Whirlpool
+
+```typescript
+import { solanaPortalSource, solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import { instructions as orcaInstructions } from './orca_abi'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 371602677 },
+    programId: 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',
+    instructions: {
+      swap: orcaInstructions.Swap,
+      initializeConfig: orcaInstructions.InitializeConfig,
+    },
+  })
+)
+
+for await (const { data } of stream) {
+  console.log(`Found ${data.swap.length} swap instructions`)
+  
+  for (const swapEvent of data.swap) {
+    console.log('Swap details:', {
+      block: swapEvent.blockNumber,
+      timestamp: swapEvent.timestamp,
+      programId: swapEvent.programId,
+      accounts: swapEvent.instruction.accounts,
+      data: swapEvent.instruction.data,
+    })
+  }
+}
+```
+
+### Multiple Program IDs
+
+```typescript
+import { solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import { instructions } from './token_abi'
+
+const decoder = solanaInstructionDecoder({
+  range: { from: 0 },
+  programId: [
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // Token Program
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', // Token-2022 Program
+  ],
+  instructions: {
+    transfer: instructions.Transfer,
+    mint: instructions.MintTo,
+  },
+})
+```
+
+### With Error Handling
+
+```typescript
+import { solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import { instructions } from './abi'
+
+const decoder = solanaInstructionDecoder({
+  range: { from: 371602677 },
+  programId: 'YourProgramId...',
+  instructions: {
+    customInstruction: instructions.CustomInstruction,
+  },
+  profiler: { id: 'Custom Instruction Decoder' },
+  onError: (ctx, error) => {
+    // Log error but continue processing
+    console.error(`Error at block ${ctx.block?.number}:`, error.message)
+  },
+})
+```
+
+### Accessing Transaction Context
+
+```typescript
+for await (const { data } of stream) {
+  for (const event of data.swap) {
+    // Access decoded instruction data
+    console.log('Instruction data:', event.instruction)
+    
+    // Access transaction details
+    console.log('Transaction signature:', event.transaction.signatures[0])
+    
+    // Access inner instructions (CPIs)
+    console.log('Inner instructions:', event.innerInstructions.length)
+    
+    // Access token balance changes
+    for (const balance of event.tokenBalances) {
+      console.log(`Token balance change: ${balance.preAmount} -> ${balance.postAmount}`)
+    }
+    
+    // Access raw instruction
+    console.log('Raw instruction address:', event.rawInstruction.instructionAddress)
+  }
+}
+```
+
+## Instruction Discriminators
+
+Solana instructions are identified using discriminators - prefixes of the instruction data field:
+
+- **d1**: 1-byte discriminator (2 hex characters)
+- **d2**: 2-byte discriminator (4 hex characters)
+- **d4**: 4-byte discriminator (8 hex characters)
+- **d8**: 8-byte discriminator (16 hex characters)
+
+Each instruction ABI definition must include at least one discriminator field:
+
+```typescript
+interface AbiInstruction<A, D> {
+  d1?: string  // e.g., "f8"
+  d2?: string  // e.g., "f8c6"
+  d4?: string  // e.g., "f8c69e91"
+  d8?: string  // e.g., "f8c69e9170a5d2e8"
+  decode(event: any): { accounts: A; data: D }
+}
+```
+
+## Auto-Selected Fields
+
+The decoder automatically selects the following fields from the Portal data:
+
+```typescript
+{
+  block: {
+    number: true,
+    hash: true,
+    timestamp: true,
+  },
+  transaction: {
+    transactionIndex: true,
+    signatures: true,
+  },
+  instruction: {
+    transactionIndex: true,
+    data: true,
+    instructionAddress: true,
+    programId: true,
+    accounts: true,
+  },
+  tokenBalance: {
+    transactionIndex: true,
+    account: true,
+    preMint: true,
+    preAmount: true,
+    preDecimals: true,
+    postMint: true,
+    postAmount: true,
+    postDecimals: true,
+  },
+}
+```
+
+## Error Handling
+
+By default, decoding errors are thrown and will stop the pipeline. Common errors include:
+
+- **Missing discriminators**: Ensure each instruction ABI has at least one discriminator (`d1`, `d2`, `d4`, or `d8`)
+- **Invalid ABI**: Verify that you're passing instruction definitions, not event definitions
+- **Decode failures**: The instruction data doesn't match the expected ABI format
+
+Implement custom error handling with the `onError` parameter to log errors and continue processing.
+
+## Notes
+
+- Instructions are automatically filtered by program ID and discriminator before decoding
+- Inner instructions (cross-program invocations) are included in the `innerInstructions` array
+- Token balance changes are automatically associated with instructions via `transactionIndex`
+- All instructions must have `isCommitted: true` to be processed
+- The decoder uses the first matching discriminator type (d1, then d2, then d4, then d8)
+
+## Deprecated
+
+`createSolanaInstructionDecoder` is deprecated. Use `solanaInstructionDecoder` instead.

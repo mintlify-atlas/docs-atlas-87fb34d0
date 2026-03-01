@@ -1,0 +1,334 @@
+---
+title: 'HyperliquidFillsQueryBuilder'
+description: 'Build type-safe queries for Hyperliquid fills data'
+---
+
+## Overview
+
+The `HyperliquidFillsQueryBuilder` class provides a fluent API for constructing type-safe queries to retrieve Hyperliquid fills data from the Subsquid Network. It allows you to specify field selections and filter fills by various criteria.
+
+## Constructor
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder<F extends hyperliquidFills.FieldSelection>()
+```
+
+Creates a new query builder instance. The generic type parameter `F` represents your field selection and is automatically inferred when you call `addFields()`.
+
+## Methods
+
+### addFields()
+
+Specify which fields to retrieve from blocks and fills.
+
+```typescript
+addFields<T extends Subset<T, hyperliquidFills.FieldSelection>>(fields: T): HyperliquidFillsQueryBuilder<F & T>
+```
+
+<ParamField path="fields" type="FieldSelection" required>
+  Object specifying which block and fill fields to include in the response.
+  
+  <Expandable title="properties">
+    <ResponseField name="block" type="BlockHeaderFieldSelection">
+      Block header fields to include.
+      
+      Available fields: `number`, `hash`, `parentHash`, `timestamp`
+    </ResponseField>
+    <ResponseField name="fill" type="FillFieldSelection">
+      Fill fields to include.
+      
+      Available fields: `fillIndex`, `user`, `coin`, `px`, `sz`, `side`, `time`, `startPosition`, `dir`, `closedPnl`, `hash`, `oid`, `crossed`, `fee`, `builderFee`, `tid`, `cloid`, `feeToken`, `builder`, `twapId`
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+**Example:**
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    fill: { 
+      user: true, 
+      coin: true, 
+      px: true, 
+      sz: true, 
+      side: true 
+    }
+  })
+```
+
+### addFill()
+
+Add a fill request with filters for specific fills.
+
+```typescript
+addFill(options: RequestOptions<hyperliquidFills.FillRequest>): this
+```
+
+<ParamField path="options" type="RequestOptions<FillRequest>" required>
+  Configuration for filtering fills.
+  
+  <Expandable title="properties">
+    <ResponseField name="range" type="PortalRange" required>
+      Block range to query. Can be a simple object like `{ from: 0 }` or `{ from: 1000, to: 2000 }`.
+    </ResponseField>
+    <ResponseField name="request" type="FillRequest" required>
+      Filter criteria for fills.
+      
+      <Expandable title="properties">
+        <ResponseField name="user" type="Hex[]">
+          Filter by user addresses.
+        </ResponseField>
+        <ResponseField name="coin" type="string[]">
+          Filter by coin/asset symbols (e.g., `['BTC', 'ETH']`).
+        </ResponseField>
+        <ResponseField name="dir" type="string[]">
+          Filter by trade direction.
+        </ResponseField>
+        <ResponseField name="cloid" type="Hex[]">
+          Filter by client order IDs.
+        </ResponseField>
+        <ResponseField name="feeToken" type="string[]">
+          Filter by fee token.
+        </ResponseField>
+        <ResponseField name="builder" type="Hex[]">
+          Filter by builder addresses.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+**Example:**
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFill({
+    range: { from: 0 },
+    request: { 
+      coin: ['BTC', 'ETH'],
+      user: ['0x1234...'] 
+    }
+  })
+```
+
+### includeAllBlocks()
+
+Include all blocks in the specified range, even those without fills.
+
+```typescript
+includeAllBlocks(range?: Range): this
+```
+
+<ParamField path="range" type="Range">
+  Optional block range. Defaults to `{ from: 0 }` if not specified.
+  
+  <Expandable title="properties">
+    <ResponseField name="from" type="number" required>
+      Starting block number (inclusive).
+    </ResponseField>
+    <ResponseField name="to" type="number">
+      Ending block number (inclusive). Omit for open-ended range.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+**Example:**
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .includeAllBlocks({ from: 0, to: 1000 })
+```
+
+### addRange()
+
+Add a block range without specific fill filters.
+
+```typescript
+addRange(range: PortalRange): this
+```
+
+<ParamField path="range" type="PortalRange" required>
+  Block range to query.
+</ParamField>
+
+**Example:**
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addRange({ from: 0 })
+```
+
+### getType()
+
+Returns the query type identifier.
+
+```typescript
+getType(): string
+```
+
+Returns `'hyperliquidFills'`.
+
+### mergeDataRequests()
+
+Merges multiple data requests into a single request.
+
+```typescript
+mergeDataRequests(...requests: hyperliquidFills.DataRequest[]): hyperliquidFills.DataRequest
+```
+
+This method is used internally to combine overlapping requests.
+
+## Types
+
+### Range
+
+```typescript
+type Range = {
+  from: number
+  to?: number
+}
+```
+
+A block range with inclusive boundaries. The `to` field is optional for open-ended ranges.
+
+### RequestOptions
+
+```typescript
+type RequestOptions<R> = {
+  range: PortalRange
+  request: R
+}
+```
+
+Combines a block range with a specific request configuration.
+
+### FieldSelection
+
+```typescript
+type FieldSelection = {
+  block?: BlockHeaderFieldSelection
+  fill?: FillFieldSelection
+}
+```
+
+Specifies which fields to retrieve from blocks and fills.
+
+## Examples
+
+### Filter by specific coins
+
+```typescript
+import { HyperliquidFillsQueryBuilder } from '@subsquid/pipes'
+
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    fill: { user: true, coin: true, px: true, sz: true }
+  })
+  .addFill({
+    range: { from: 0 },
+    request: { coin: ['BTC', 'ETH', 'SOL'] }
+  })
+```
+
+### Filter by user address
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: { number: true },
+    fill: { 
+      user: true, 
+      coin: true, 
+      px: true, 
+      sz: true, 
+      side: true,
+      fee: true 
+    }
+  })
+  .addFill({
+    range: { from: 0 },
+    request: { 
+      user: ['0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb'] 
+    }
+  })
+```
+
+### Multiple filters with different ranges
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    fill: { user: true, coin: true, px: true, sz: true }
+  })
+  // BTC fills from block 0 to 1000
+  .addFill({
+    range: { from: 0, to: 1000 },
+    request: { coin: ['BTC'] }
+  })
+  // ETH fills from block 1000 onwards
+  .addFill({
+    range: { from: 1000 },
+    request: { coin: ['ETH'] }
+  })
+```
+
+### Include all blocks
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true, hash: true },
+    fill: { coin: true, px: true, sz: true }
+  })
+  .includeAllBlocks({ from: 0 })
+  .addFill({
+    range: { from: 0 },
+    request: { coin: ['BTC'] }
+  })
+```
+
+### All available fill fields
+
+```typescript
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      hash: true,
+      parentHash: true,
+      timestamp: true
+    },
+    fill: {
+      fillIndex: true,
+      user: true,
+      coin: true,
+      px: true,           // price
+      sz: true,           // size
+      side: true,         // 'A' (ask) or 'B' (bid)
+      time: true,
+      startPosition: true,
+      dir: true,
+      closedPnl: true,
+      hash: true,
+      oid: true,          // order ID
+      crossed: true,
+      fee: true,
+      builderFee: true,
+      tid: true,          // trade ID
+      cloid: true,        // client order ID
+      feeToken: true,
+      builder: true,
+      twapId: true
+    }
+  })
+  .addRange({ from: 0 })
+```
+
+## Related
+
+- [hyperliquidFillsPortalSource()](/api/hyperliquid/fills-source) - Create a Hyperliquid fills portal source
+- [Query Builder Base](/core/sources#query-builders) - Learn about query builder patterns

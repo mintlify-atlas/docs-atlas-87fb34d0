@@ -1,0 +1,380 @@
+---
+title: evmDecoder()
+description: Decode EVM events from portal data with optional indexed parameter filtering
+---
+
+## Overview
+
+Decodes EVM events from portal data and optionally filters them by indexed parameters. This transformer extracts and decodes EVM events from blockchain data, allowing you to capture all instances of an event or filter by indexed parameters to reduce data transfer and processing overhead.
+
+## Signature
+
+```typescript
+function evmDecoder<T extends Events, C extends Contracts>({
+  range,
+  contracts,
+  events,
+  profiler,
+  onError,
+}: DecodedEventPipeArgs<T, C>): Transformer<
+  EvmPortalData<typeof decodedEventFields>,
+  EventResponse<T, C>,
+  EvmQueryBuilder
+>
+```
+
+## Parameters
+
+<ParamField path="range" type="PortalRange" required>
+  Block range to query for events. Can be:
+  - `{ from: number, to?: number }` - Specific block range
+  - `{ from: 'latest' }` - Start from the latest block
+  
+  Examples:
+  - `{ from: 0 }` - From genesis to latest
+  - `{ from: 1000000, to: 2000000 }` - Specific range
+  - `{ from: 'latest' }` - Real-time monitoring
+</ParamField>
+
+<ParamField path="contracts" type="Factory<any> | string[]">
+  Contract addresses to filter events from. Can be:
+  - An array of contract addresses (e.g., `['0x...', '0x...']`)
+  - A `Factory` instance for tracking dynamically created contracts
+  
+  If not provided, events from all contracts matching the event signatures will be captured.
+</ParamField>
+
+<ParamField path="events" type="EventsMap<T>" required>
+  Map of event names to event definitions. Each entry can be:
+  
+  **Simple event (capture all instances):**
+  ```typescript
+  events: {
+    transfers: erc20Abi.events.Transfer
+  }
+  ```
+  
+  **Event with indexed parameter filtering:**
+  ```typescript
+  events: {
+    transfers: {
+      event: erc20Abi.events.Transfer,
+      params: {
+        from: '0x...', // Single value
+        to: ['0x...', '0x...'] // Multiple values
+      }
+    }
+  }
+  ```
+  
+  Only indexed parameters can be used for filtering. Non-indexed parameters will cause a type error.
+</ParamField>
+
+<ParamField path="profiler" type="ProfilerOptions">
+  Performance monitoring configuration:
+  - `id`: String identifier for the profiler
+  
+  Defaults to `{ id: 'EVM decoder' }` if not provided.
+</ParamField>
+
+<ParamField path="onError" type="(ctx: BatchCtx, error: any) => unknown | Promise<unknown>">
+  Error handler callback that receives:
+  - `ctx`: Batch context with cursor and profiler information
+  - `error`: The error that occurred during decoding
+  
+  This function is called before the error is re-thrown, allowing you to log or handle errors gracefully.
+</ParamField>
+
+## Returns
+
+Returns a `Transformer` that processes `EvmPortalData` and outputs an `EventResponse<T, C>` object.
+
+The `EventResponse` is an object where each key corresponds to an event name from the `events` parameter, and each value is an array of decoded events:
+
+```typescript
+type EventResponse<T extends Events, C> = {
+  [K in keyof T]: DecodedEvent<
+    AbiDecodeEvent<ExtractEventType<EventsMap<T>[K]>>,
+    C extends Factory<infer R> ? DecodedAbiEvent<R> : never
+  >[]
+}
+```
+
+## Decoded Event Structure
+
+Each decoded event has the following structure:
+
+```typescript
+type DecodedEvent<D = object, F = unknown> = {
+  // Decoded event data based on your ABI
+  event: D
+  
+  // Contract address that emitted the event
+  contract: string
+  
+  // Block information
+  block: {
+    number: number
+    hash: string
+  }
+  
+  // Block timestamp as a Date object
+  timestamp: Date
+  
+  // Factory event info (only if using Factory)
+  factory?: F extends object ? FactoryEvent<F> : never
+  
+  // Raw event data from the blockchain
+  rawEvent: Log<{
+    address: true
+    topics: true
+    data: true
+    transactionHash: true
+    logIndex: true
+    transactionIndex: true
+  }>
+}
+```
+
+## Type Definitions
+
+```typescript
+// Event map definition
+type Events = Record<string, AbiEvent<any> | EventWithArgsInput<AbiEvent<any>>>
+
+// Event with indexed parameter filtering
+type EventWithArgsInput<T extends AbiEvent<any>> = {
+  event: T
+  params: IndexedParamsInput<T>
+}
+
+// Indexed parameters input (single value or array)
+type IndexedParamsInput<T extends AbiEvent<any>> = Partial<{
+  [K in IndexedKeys<T['params']>]: CodecValueType<T, K> | CodecValueType<T, K>[]
+}>
+
+// Factory event info
+type FactoryEvent<T> = {
+  contract: string
+  blockNumber: number
+  event: T
+}
+```
+
+## Examples
+
+### Basic Event Decoding
+
+```typescript
+import { evmDecoder } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+const decoder = evmDecoder({
+  range: { from: 0 },
+  events: {
+    transfers: erc20Abi.events.Transfer,
+    approvals: erc20Abi.events.Approval,
+  },
+})
+
+// Output type:
+// {
+//   transfers: DecodedEvent<{ from: string, to: string, value: bigint }>[]
+//   approvals: DecodedEvent<{ owner: string, spender: string, value: bigint }>[]
+// }
+```
+
+### Filter by Contract Addresses
+
+```typescript
+import { evmDecoder } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+const decoder = evmDecoder({
+  range: { from: 0 },
+  contracts: [
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', // USDC
+    '0xdac17f958d2ee523a2206206994597c13d831ec7', // USDT
+  ],
+  events: {
+    transfers: erc20Abi.events.Transfer,
+  },
+})
+```
+
+### Filter by Indexed Parameters
+
+```typescript
+import { evmDecoder } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+const decoder = evmDecoder({
+  range: { from: 0 },
+  events: {
+    // Capture all approvals
+    approvals: erc20Abi.events.Approval,
+    
+    // Filter transfers by indexed parameters
+    transfers: {
+      event: erc20Abi.events.Transfer,
+      params: {
+        // Single address
+        from: '0x87482e84503639466fad82d1dce97f800a410945',
+        
+        // Multiple addresses
+        to: [
+          '0x10b32a54eeb05d2c9cd1423b4ad90c3671a2ed5f',
+          '0x742d35cc6634c0532925a3b844bc9e7595f0bee',
+        ],
+      },
+    },
+  },
+})
+```
+
+### With Factory Pattern
+
+```typescript
+import { evmDecoder, factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { uniswapV3FactoryAbi, uniswapV3PoolAbi } from './abi'
+
+// Create factory to track pool creation
+const poolFactory = factory({
+  address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+  event: uniswapV3FactoryAbi.events.PoolCreated,
+  parameter: 'pool',
+  database: factorySqliteDatabase({
+    path: './uniswap-pools.sqlite',
+  }),
+})
+
+// Decode events from all pools created by the factory
+const decoder = evmDecoder({
+  range: { from: 0 },
+  contracts: poolFactory,
+  events: {
+    swaps: uniswapV3PoolAbi.events.Swap,
+    mints: uniswapV3PoolAbi.events.Mint,
+    burns: uniswapV3PoolAbi.events.Burn,
+  },
+})
+
+// Each decoded event will include factory information:
+// {
+//   swaps: [{
+//     event: { ... },
+//     contract: '0x...', // Pool address
+//     factory: {
+//       contract: '0x1f98431c8ad98523631ae4a59f267346ea31f984', // Factory address
+//       blockNumber: 12345678,
+//       event: { token0: '0x...', token1: '0x...', pool: '0x...' }
+//     },
+//     ...
+//   }]
+// }
+```
+
+### With Error Handling
+
+```typescript
+import { evmDecoder } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+const decoder = evmDecoder({
+  range: { from: 0 },
+  events: {
+    transfers: erc20Abi.events.Transfer,
+  },
+  profiler: { id: 'ERC20 Transfer Decoder' },
+  onError: (ctx, error) => {
+    console.error('Decoding error at block', ctx.cursor.number)
+    console.error(error)
+    // Error will be re-thrown after this callback
+  },
+})
+```
+
+### Complete Pipeline
+
+```typescript
+import { evmPortalSource, evmDecoder, createTarget } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+await evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  logger: 'info',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 0 },
+      contracts: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      events: {
+        transfers: {
+          event: erc20Abi.events.Transfer,
+          params: {
+            to: '0x742d35cc6634c0532925a3b844bc9e7595f0bee',
+          },
+        },
+      },
+    })
+  )
+  .pipeTo(
+    createTarget({
+      write: async ({ read }) => {
+        for await (const { data } of read()) {
+          for (const transfer of data.transfers) {
+            console.log(`Transfer to Vitalik's address:`, {
+              from: transfer.event.from,
+              value: transfer.event.value.toString(),
+              block: transfer.block.number,
+              timestamp: transfer.timestamp,
+            })
+          }
+        }
+      },
+    })
+  )
+```
+
+## Important Notes
+
+### Indexed Parameters Only
+
+Only indexed parameters can be used for filtering. The TypeScript types will prevent you from using non-indexed parameters:
+
+```typescript
+// ✅ Correct - 'from' and 'to' are indexed
+events: {
+  transfers: {
+    event: erc20Abi.events.Transfer,
+    params: {
+      from: '0x...',
+      to: '0x...',
+    },
+  },
+}
+
+// ❌ Error - 'value' is not indexed
+events: {
+  transfers: {
+    event: erc20Abi.events.Transfer,
+    params: {
+      value: 1000n, // Type error!
+    },
+  },
+}
+```
+
+### Duplicate Event Topics
+
+If you provide multiple events with the same topic hash, the decoder will log a warning and may miss events. Ensure each event has a unique signature.
+
+### Address Normalization
+
+All addresses are automatically normalized to lowercase for consistent comparison.
+
+## Related
+
+- [evmPortalSource()](/api/evm/portal-source) - Create a portal source for EVM data
+- [Factory](/api/evm/factory) - Track dynamically created contracts
+- [EvmQueryBuilder](/api/evm/query-builder) - Build advanced EVM queries

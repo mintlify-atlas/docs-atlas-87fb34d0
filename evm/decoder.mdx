@@ -1,0 +1,369 @@
+---
+title: Event Decoder
+description: Decode and filter EVM events with type safety
+---
+
+## Overview
+
+The `evmDecoder` function transforms raw blockchain data into typed, decoded events. It provides efficient filtering by indexed parameters, support for multiple event types, and optional factory contract tracking.
+
+## Basic Usage
+
+```typescript
+import { evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+
+const decoder = evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+  },
+})
+```
+
+## Configuration
+
+### Type Signature
+
+```typescript evm-decoder.ts:309-319
+function evmDecoder<T extends Events, C extends Contracts>({
+  range,
+  contracts,
+  events,
+  profiler,
+  onError,
+}: DecodedEventPipeArgs<T, C>): Transformer<
+  EvmPortalData<typeof decodedEventFields>,
+  EventResponse<T, C>,
+  EvmQueryBuilder
+>
+```
+
+### Parameters
+
+<ParamField path="range" type="PortalRange" required>
+  Block range to query. Supports various formats:
+  - `{ from: 'latest' }` - Start from the latest block
+  - `{ from: 12369621 }` - Start from specific block
+  - `{ from: '12,369,621', to: '12,400,000' }` - Fixed range
+  - `{ from: 12369621, to: '+1000' }` - Process 1000 blocks
+</ParamField>
+
+<ParamField path="events" type="EventsMap<T>" required>
+  Map of event names to event definitions. Each entry can be:
+  - An `AbiEvent` instance to capture all instances
+  - An `EventWithArgs` object with `event` and `params` to filter by indexed parameters
+</ParamField>
+
+<ParamField path="contracts" type="string[] | Factory">
+  Optional contract addresses or factory instance for filtering events.
+</ParamField>
+
+<ParamField path="profiler" type="ProfilerOptions">
+  Performance monitoring configuration with an `id` for tracking.
+</ParamField>
+
+<ParamField path="onError" type="(ctx: BatchCtx, error: any) => unknown">
+  Error handler callback invoked when event decoding fails.
+</ParamField>
+
+## Examples
+
+### Decoding ERC20 Transfers
+
+Decode all ERC20 transfer events:
+
+```typescript 01.basic-piping.example.ts:12-22
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  // logger: 'debug',
+}).pipe(
+  evmDecoder({
+    range: { from: 'latest' },
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }),
+)
+```
+
+### Filtering by Indexed Parameters
+
+Filter events to reduce data transfer and processing:
+
+```typescript 09.filtering-by-event-params.example.ts:14-31
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+}).pipe(
+  evmDecoder({
+    range: { from: '24171448', to: '24171449' },
+    events: {
+      // Use the AbiEvent instance directly for convenience if you need all the emitted events
+      approvals: commonAbis.erc20.events.Approval,
+      // Or filter by any of the indexed parameters defined in the contract
+      transfers: {
+        event: commonAbis.erc20.events.Transfer,
+        params: {
+          // For every event param you can use an array to match multiple values
+          from: ['0x87482e84503639466fad82d1dce97f800a410945'],
+          // Or pass a single value directly
+          to: '0x10b32a54eeb05d2c9cd1423b4ad90c3671a2ed5f',
+        },
+      },
+    },
+  }),
+)
+```
+
+### Multiple Event Types
+
+Decode multiple event types in a single decoder:
+
+```typescript
+evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+    approvals: commonAbis.erc20.events.Approval,
+  },
+})
+```
+
+### With Specific Contracts
+
+Limit decoding to specific contract addresses:
+
+```typescript
+evmDecoder({
+  range: { from: 'latest' },
+  contracts: [
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', // USDC
+    '0xdac17f958d2ee523a2206206994597c13d831ec7', // USDT
+  ],
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+  },
+})
+```
+
+### With Factory Contracts
+
+Decode events from dynamically created contracts:
+
+```typescript 03.factory.example.ts:21-39
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+}).pipe(
+  evmDecoder({
+    range: { from: '12,369,621' },
+    contracts: factory({
+      address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+      event: factoryAbi.PoolCreated,
+      parameter: 'pool',
+      database: factorySqliteDatabase({
+        path: './uniswap3-eth-pools.sqlite',
+      }),
+    }),
+    events: {
+      swaps: swapsAbi.Swap,
+      fees: swapsAbi.SetFeeProtocol,
+    },
+  }),
+)
+```
+
+## Decoded Event Structure
+
+Each decoded event has the following structure:
+
+```typescript evm-decoder.ts:28-45
+type DecodedEvent<D = object, F = unknown> = {
+  event: D
+  contract: string
+  block: {
+    number: number
+    hash: string
+  }
+  timestamp: Date
+  factory?: F extends object ? FactoryEvent<F> : never
+  rawEvent: Log<{
+    address: true
+    topics: true
+    data: true
+    transactionHash: true
+    logIndex: true
+    transactionIndex: true
+  }>
+}
+```
+
+### Accessing Decoded Data
+
+```typescript
+for await (const { data } of stream) {
+  for (const transfer of data.transfers) {
+    console.log({
+      from: transfer.event.from,
+      to: transfer.event.to,
+      value: transfer.event.value,
+      contract: transfer.contract,
+      blockNumber: transfer.block.number,
+      timestamp: transfer.timestamp,
+    })
+  }
+}
+```
+
+## Indexed Parameters
+
+Only indexed event parameters can be filtered. Check your contract ABI to see which parameters are indexed:
+
+```solidity
+// In Solidity, indexed parameters are marked with 'indexed'
+event Transfer(address indexed from, address indexed to, uint256 value);
+```
+
+In this example, `from` and `to` are indexed and can be filtered:
+
+```typescript
+{
+  event: commonAbis.erc20.events.Transfer,
+  params: {
+    from: '0x...',  // ✅ Can filter
+    to: '0x...',    // ✅ Can filter
+    // value: 100n  // ❌ Cannot filter (not indexed)
+  },
+}
+```
+
+## Parameter Filtering
+
+### Single Value
+
+```typescript
+params: {
+  from: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+}
+```
+
+### Multiple Values
+
+```typescript
+params: {
+  from: [
+    '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  ],
+}
+```
+
+### Multiple Parameters
+
+```typescript
+params: {
+  from: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+  to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+}
+```
+
+## Creating Reusable Decoders
+
+Build reusable decoder functions for common patterns:
+
+```typescript decoders/erc20-transfers.ts:12-34
+function erc20Transfers({ range, contracts }: { range?: PortalRange; contracts?: string[] } = {}) {
+  return evmDecoder({
+    profiler: { id: 'ERC20 transfers' },
+    range: range || { from: 'latest' },
+    contracts,
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }).pipe({
+    profiler: { id: 'rename fields' },
+    transform: ({ transfers }) => {
+      return transfers.map(
+        ({ event, timestamp, contract }): Erc20Event => ({
+          from: event.from,
+          to: event.to,
+          amount: event.value,
+          token_address: contract,
+          timestamp: timestamp,
+        }),
+      )
+    },
+  })
+}
+```
+
+## Error Handling
+
+Handle decoding errors gracefully:
+
+```typescript
+evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+  },
+  onError: (ctx, error) => {
+    console.error('Decoding error:', error)
+    // Optionally re-throw or handle
+  },
+})
+```
+
+## Performance Tips
+
+### Use Indexed Parameter Filtering
+
+Filtering by indexed parameters happens server-side, reducing data transfer:
+
+```typescript
+// ✅ Good - filters server-side
+evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: {
+      event: commonAbis.erc20.events.Transfer,
+      params: { from: '0x...' },
+    },
+  },
+})
+
+// ❌ Less efficient - filters client-side
+evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+  },
+}).pipe({
+  transform: (data) => ({
+    transfers: data.transfers.filter(t => t.event.from === '0x...'),
+  }),
+})
+```
+
+### Specify Contracts When Possible
+
+Providing contract addresses improves query performance:
+
+```typescript
+evmDecoder({
+  range: { from: 'latest' },
+  contracts: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+  events: {
+    transfers: commonAbis.erc20.events.Transfer,
+  },
+})
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Factory Contracts" icon="arrow-right" href="/evm/factory-contracts">
+    Track dynamically created contracts
+  </Card>
+  <Card title="Query Builder" icon="arrow-right" href="/evm/query-builder">
+    Build advanced queries
+  </Card>
+</CardGroup>

@@ -1,0 +1,223 @@
+---
+title: Logging
+description: Structured logging with Pino in Subsquid Pipes
+---
+
+Subsquid Pipes uses [Pino](https://getpino.io/) for structured, high-performance logging. The SDK provides a default logger configuration and supports custom log transports for integration with external services.
+
+## Logger Configuration
+
+The SDK exports a `Logger` type and utilities for creating loggers:
+
+```typescript
+import { Logger, LogLevel, createDefaultLogger } from '@subsquid/pipes'
+
+type Logger = PinoLogger
+type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent' | false | null
+```
+
+### Default Logger
+
+Create a logger with default settings:
+
+```typescript
+const logger = createDefaultLogger({ level: 'info' })
+```
+
+**Default configuration:**
+- Uses `LOG_LEVEL` environment variable (defaults to `'info'`)
+- Enables pretty printing in TTY environments (unless `LOG_PRETTY=false`)
+- Includes error serialization with cause tracking
+- Outputs structured JSON in non-TTY environments
+
+## Using Logger in Portal Source
+
+Pass a logger instance or log level to the portal source:
+
+### Simple log level configuration
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  logger: 'debug', // Set log level directly
+})
+```
+
+### Custom logger instance
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+import { createDefaultLogger } from '@subsquid/pipes'
+
+const logger = createDefaultLogger({ level: 'warn' })
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  logger,
+})
+```
+
+## Custom Log Transports
+
+Pino supports [custom transports](https://getpino.io/#/docs/transports) for routing logs to external services like Sentry, Datadog, or cloud logging platforms.
+
+### Example: Sentry Integration
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+import pino from 'pino'
+import { erc20Transfers } from './decoders'
+
+const transport = pino.transport({
+  target: 'pino-sentry-transport',
+  options: {
+    sentry: {
+      dsn: 'https://******@sentry.io/12345',
+    },
+  },
+})
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  logger: pino(transport),
+}).pipe(erc20Transfers())
+
+for await (const { data } of stream) {
+  console.log(`parsed ${data.length} transfers`)
+}
+```
+
+### Multiple Transports
+
+Combine multiple transports for logging to different destinations:
+
+```typescript
+import pino from 'pino'
+
+const logger = pino({
+  transport: {
+    targets: [
+      {
+        target: 'pino-pretty',
+        level: 'info',
+        options: { colorize: true },
+      },
+      {
+        target: 'pino-sentry-transport',
+        level: 'error',
+        options: {
+          sentry: { dsn: 'https://******@sentry.io/12345' },
+        },
+      },
+    ],
+  },
+})
+```
+
+## Accessing Logger in Batch Context
+
+The logger is available in the batch context for logging within transformers:
+
+```typescript
+for await (const { data, ctx } of stream) {
+  ctx.logger.info({ transfers: data.transfers.length }, 'Processing batch')
+  
+  if (data.transfers.length > 10000) {
+    ctx.logger.warn('Large batch detected')
+  }
+}
+```
+
+## Log Levels
+
+<ParamField path="fatal" type="number" default="60">
+  Critical errors that cause application termination
+</ParamField>
+
+<ParamField path="error" type="number" default="50">
+  Error conditions that need attention
+</ParamField>
+
+<ParamField path="warn" type="number" default="40">
+  Warning messages for potentially harmful situations
+</ParamField>
+
+<ParamField path="info" type="number" default="30">
+  Informational messages about application progress
+</ParamField>
+
+<ParamField path="debug" type="number" default="20">
+  Detailed debugging information
+</ParamField>
+
+<ParamField path="trace" type="number" default="10">
+  Very detailed diagnostic information
+</ParamField>
+
+## Environment Variables
+
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  Default log level when not specified in code
+</ParamField>
+
+<ParamField path="LOG_PRETTY" type="boolean" default="true (in TTY)">
+  Enable/disable pretty printing. Set to `false` or `0` to disable
+</ParamField>
+
+## Warnings and Errors
+
+The SDK includes a `formatWarning` utility for consistent warning messages:
+
+```typescript
+import { formatWarning } from '@subsquid/pipes'
+
+const warning = formatWarning({
+  title: 'Dataset Latency Warning',
+  content: [
+    'This dataset does not provide real-time block streaming.',
+    'Data will lag behind the chain head.',
+  ],
+})
+
+logger.warn(warning)
+```
+
+Output:
+
+```
+==================================================================
+⚠️  Dataset Latency Warning
+------------------------------------------------------------------
+
+This dataset does not provide real-time block streaming.
+Data will lag behind the chain head.
+==================================================================
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use structured logging">
+    Pass objects instead of string interpolation for better queryability:
+    
+    ```typescript
+    // Good
+    logger.info({ blockNumber: 12345, txCount: 42 }, 'Processed block')
+    
+    // Avoid
+    logger.info(`Processed block ${blockNumber} with ${txCount} transactions`)
+    ```
+  </Accordion>
+
+  <Accordion title="Set appropriate log levels">
+    - Use `debug` or `trace` during development
+    - Use `info` or `warn` in production
+    - Avoid logging sensitive data at any level
+  </Accordion>
+
+  <Accordion title="Configure transports for production">
+    Route error logs to monitoring services like Sentry or Datadog for production environments
+  </Accordion>
+</AccordionGroup>

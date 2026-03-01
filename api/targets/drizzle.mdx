@@ -1,0 +1,381 @@
+---
+title: 'drizzleTarget()'
+description: 'Create a PostgreSQL target using Drizzle ORM with automatic rollback support'
+---
+
+## Overview
+
+Creates a PostgreSQL target that writes pipeline data using Drizzle ORM. This target automatically creates database triggers for tracking changes, enabling efficient rollbacks when blockchain forks are detected.
+
+## Signature
+
+```typescript
+function drizzleTarget<T>(options: {
+  db: NodePgDatabase
+  tables: Table[] | Record<string, Table>
+  settings?: {
+    state?: StateOptions
+    transaction?: {
+      isolationLevel?: 'read uncommitted' | 'read committed' | 'repeatable read' | 'serializable'
+    }
+  }
+  onStart?: (ctx: { db: NodePgDatabase }) => Promise<unknown>
+  onData: (ctx: { tx: Transaction; data: T; ctx: Ctx }) => Promise<unknown>
+  onBeforeRollback?: (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
+  onAfterRollback?: (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
+}): Target<T>
+```
+
+## Parameters
+
+<ParamField path="db" type="NodePgDatabase" required>
+  Drizzle database instance created with `drizzle()` from `drizzle-orm/node-postgres`.
+</ParamField>
+
+<ParamField path="tables" type="Table[] | Record<string, Table>" required>
+  Array or object of Drizzle table definitions that will be tracked for automatic rollbacks.
+</ParamField>
+
+<ParamField path="settings" type="object">
+  Configuration for state management and transactions.
+  
+  <Expandable title="properties">
+    <ResponseField name="state" type="StateOptions">
+      State management configuration.
+      
+      <Expandable title="properties">
+        <ResponseField name="schema" type="string">
+          PostgreSQL schema for state table.
+        </ResponseField>
+        <ResponseField name="table" type="string">
+          Table name for storing pipeline state.
+        </ResponseField>
+        <ResponseField name="id" type="string">
+          Unique identifier for this pipeline instance.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="transaction" type="object">
+      Transaction configuration.
+      
+      <Expandable title="properties">
+        <ResponseField name="isolationLevel" type="string" default="serializable">
+          Transaction isolation level. Options: `'read uncommitted'`, `'read committed'`, `'repeatable read'`, `'serializable'`.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="onStart" type="function">
+  Optional callback that runs before processing starts.
+  
+  ```typescript
+  (ctx: { db: NodePgDatabase }) => Promise<unknown>
+  ```
+  
+  Use this to create tables or perform other initialization tasks.
+</ParamField>
+
+<ParamField path="onData" type="function" required>
+  Callback that processes each batch of data within a transaction.
+  
+  ```typescript
+  (ctx: { tx: Transaction; data: T; ctx: Ctx }) => Promise<unknown>
+  ```
+  
+  **Context properties:**
+  - `tx`: Drizzle transaction instance for database operations
+  - `data`: Transformed data from the pipeline
+  - `ctx.logger`: Logger instance
+  - `ctx.profiler`: Profiler for measuring performance
+</ParamField>
+
+<ParamField path="onBeforeRollback" type="function">
+  Optional callback that runs before a rollback is performed.
+  
+  ```typescript
+  (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
+  ```
+  
+  **Context properties:**
+  - `tx`: Drizzle transaction instance
+  - `cursor`: Block cursor representing the safe rollback point
+</ParamField>
+
+<ParamField path="onAfterRollback" type="function">
+  Optional callback that runs after a rollback is performed.
+  
+  ```typescript
+  (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
+  ```
+  
+  **Context properties:**
+  - `tx`: Drizzle transaction instance
+  - `cursor`: Block cursor representing the safe rollback point
+</ParamField>
+
+## Returns
+
+Returns a `Target<T>` instance that can be used as the final stage of a pipeline.
+
+## Example
+
+### Basic usage
+
+```typescript
+import { drizzleTarget } from '@subsquid/pipes'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { pgTable, text, bigint } from 'drizzle-orm/pg-core'
+import { Pool } from 'pg'
+
+const transfersTable = pgTable('transfers', {
+  id: text('id').primaryKey(),
+  blockNumber: bigint('block_number', { mode: 'number' }).notNull(),
+  from: text('from').notNull(),
+  to: text('to').notNull(),
+  amount: bigint('amount', { mode: 'bigint' }).notNull()
+})
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const db = drizzle(pool)
+
+const target = drizzleTarget({
+  db,
+  tables: [transfersTable],
+  onData: async ({ tx, data }) => {
+    await tx.insert(transfersTable).values(data)
+  }
+})
+```
+
+### With table creation
+
+```typescript
+import { sql } from 'drizzle-orm'
+
+const target = drizzleTarget({
+  db,
+  tables: [transfersTable],
+  onStart: async ({ db }) => {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS transfers (
+        id TEXT PRIMARY KEY,
+        block_number BIGINT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        from_address TEXT NOT NULL,
+        to_address TEXT NOT NULL,
+        amount NUMERIC NOT NULL
+      )
+    `)
+    
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_transfers_block 
+      ON transfers(block_number)
+    `)
+  },
+  onData: async ({ tx, data }) => {
+    if (data.length === 0) return
+    await tx.insert(transfersTable).values(data)
+  }
+})
+```
+
+### With multiple tables
+
+```typescript
+const transfersTable = pgTable('transfers', {
+  id: text('id').primaryKey(),
+  blockNumber: bigint('block_number', { mode: 'number' }).notNull(),
+  from: text('from').notNull(),
+  to: text('to').notNull(),
+  amount: bigint('amount', { mode: 'bigint' }).notNull()
+})
+
+const accountsTable = pgTable('accounts', {
+  address: text('address').primaryKey(),
+  balance: bigint('balance', { mode: 'bigint' }).notNull()
+})
+
+const target = drizzleTarget({
+  db,
+  tables: [transfersTable, accountsTable],
+  onData: async ({ tx, data }) => {
+    // Insert transfers
+    await tx.insert(transfersTable).values(data.transfers)
+    
+    // Update account balances
+    for (const account of data.accounts) {
+      await tx
+        .insert(accountsTable)
+        .values(account)
+        .onConflictDoUpdate({
+          target: accountsTable.address,
+          set: { balance: account.balance }
+        })
+    }
+  }
+})
+```
+
+### With rollback handling
+
+```typescript
+const target = drizzleTarget({
+  db,
+  tables: [transfersTable, accountsTable],
+  settings: {
+    state: {
+      schema: 'public',
+      table: 'pipeline_state',
+      id: 'ethereum-usdc-transfers'
+    },
+    transaction: {
+      isolationLevel: 'serializable'
+    }
+  },
+  onData: async ({ tx, data, ctx }) => {
+    await ctx.profiler.measure('insert transfers', async () => {
+      await tx.insert(transfersTable).values(data)
+    })
+  },
+  onBeforeRollback: async ({ tx, cursor }) => {
+    console.log(`Preparing to roll back to block ${cursor.number}`)
+    // Custom cleanup logic before rollback
+  },
+  onAfterRollback: async ({ tx, cursor }) => {
+    console.log(`Rolled back to block ${cursor.number}`)
+    // Custom logic after rollback completes
+  }
+})
+```
+
+### Complete pipeline
+
+```typescript
+import { 
+  evmPortalSource,
+  EvmQueryBuilder,
+  createTransformer,
+  drizzleTarget,
+  decode
+} from '@subsquid/pipes'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { Pool } from 'pg'
+import * as erc20 from './abi/erc20'
+
+const transfersTable = pgTable('transfers', {
+  id: text('id').primaryKey(),
+  blockNumber: bigint('block_number', { mode: 'number' }).notNull(),
+  timestamp: bigint('timestamp', { mode: 'number' }).notNull(),
+  txHash: text('tx_hash').notNull(),
+  from: text('from').notNull(),
+  to: text('to').notNull(),
+  amount: text('amount').notNull()
+})
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const db = drizzle(pool)
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/ethereum',
+  query: new EvmQueryBuilder()
+    .addFields({
+      block: { number: true, timestamp: true },
+      log: { address: true, topics: true, data: true, transactionHash: true }
+    })
+    .addLog({
+      range: { from: 0 },
+      request: {
+        address: ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'], // USDC
+        topic0: [erc20.events.Transfer.topic]
+      }
+    })
+})
+
+const transform = createTransformer({
+  transform: (data) => {
+    return data.blocks.flatMap(block =>
+      block.logs.map(log => {
+        const event = decode(erc20.events.Transfer, log)
+        return {
+          id: `${log.transactionHash}-${log.logIndex}`,
+          blockNumber: block.header.number,
+          timestamp: block.header.timestamp,
+          txHash: log.transactionHash,
+          from: event.from,
+          to: event.to,
+          amount: event.value.toString()
+        }
+      })
+    )
+  }
+})
+
+const target = drizzleTarget({
+  db,
+  tables: [transfersTable],
+  onStart: async ({ db }) => {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS transfers (
+        id TEXT PRIMARY KEY,
+        block_number BIGINT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        from_address TEXT NOT NULL,
+        to_address TEXT NOT NULL,
+        amount TEXT NOT NULL
+      )
+    `)
+  },
+  onData: async ({ tx, data }) => {
+    if (data.length === 0) return
+    await tx.insert(transfersTable).values(data)
+  }
+})
+
+source.pipe(transform).pipe(target).start()
+```
+
+## How Rollbacks Work
+
+The Drizzle target uses PostgreSQL triggers to track all changes made to your tables:
+
+1. **Trigger creation**: On startup, the target creates triggers on all specified tables
+2. **Change tracking**: Every INSERT, UPDATE, and DELETE is recorded with the block number
+3. **Fork detection**: When a blockchain fork is detected, the target identifies the safe block
+4. **Automatic rollback**: All changes made after the safe block are automatically reverted
+5. **Resume processing**: The pipeline resumes from the safe block
+
+This happens automatically without requiring manual rollback logic in most cases.
+
+## Transaction Isolation
+
+The default isolation level is `'serializable'`, which provides the strongest consistency guarantees. You can change this based on your needs:
+
+- `'read uncommitted'`: Lowest isolation, best performance, allows dirty reads
+- `'read committed'`: Default PostgreSQL level, prevents dirty reads
+- `'repeatable read'`: Prevents non-repeatable reads
+- `'serializable'`: Strongest isolation, prevents all anomalies
+
+```typescript
+const target = drizzleTarget({
+  db,
+  tables: [myTable],
+  settings: {
+    transaction: {
+      isolationLevel: 'read committed'
+    }
+  },
+  onData: async ({ tx, data }) => {
+    await tx.insert(myTable).values(data)
+  }
+})
+```
+
+## Related
+
+- [clickhouseTarget()](/api/targets/clickhouse) - ClickHouse database target
+- [Custom Targets](/targets/custom) - Create custom target implementations
+- [Fork Handling](/core/fork-handling) - Learn about blockchain fork detection
+- [Drizzle ORM Documentation](https://orm.drizzle.team/) - Official Drizzle ORM docs

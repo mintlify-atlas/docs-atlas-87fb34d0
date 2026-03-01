@@ -1,0 +1,131 @@
+---
+title: EVM Support
+description: Subsquid Pipes SDK provides comprehensive support for EVM-compatible blockchains
+---
+
+## Overview
+
+The Subsquid Pipes SDK provides a complete toolkit for building high-performance data pipelines from EVM-compatible blockchains. The SDK handles the complexity of querying, decoding, and processing blockchain data, allowing you to focus on your business logic.
+
+## Core Components
+
+The EVM module consists of four main components:
+
+<CardGroup cols={2}>
+  <Card title="Portal Source" icon="database" href="/evm/portal-source">
+    Stream blockchain data from Subsquid Portal API
+  </Card>
+  <Card title="Event Decoder" icon="code" href="/evm/decoder">
+    Decode and filter EVM events with type safety
+  </Card>
+  <Card title="Factory Contracts" icon="industry" href="/evm/factory-contracts">
+    Track dynamically created contracts
+  </Card>
+  <Card title="Query Builder" icon="wrench" href="/evm/query-builder">
+    Build custom EVM data queries
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+Here's a simple example that streams and decodes ERC20 transfer events:
+
+```typescript
+import { evmPortalSource, evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+}).pipe(
+  evmDecoder({
+    range: { from: 'latest' },
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }),
+)
+
+for await (const { data } of stream) {
+  console.log(`Processed ${data.transfers.length} transfers`)
+}
+```
+
+## Key Features
+
+### Type-Safe Event Decoding
+
+The SDK provides full TypeScript type inference for decoded events, ensuring compile-time safety:
+
+```typescript
+for await (const { data } of stream) {
+  for (const transfer of data.transfers) {
+    // TypeScript knows the shape of transfer.event
+    const { from, to, value } = transfer.event
+    console.log(`${from} -> ${to}: ${value}`)
+  }
+}
+```
+
+### Efficient Data Filtering
+
+Filter events by indexed parameters to reduce data transfer and processing:
+
+```typescript
+evmDecoder({
+  range: { from: 'latest' },
+  events: {
+    transfers: {
+      event: commonAbis.erc20.events.Transfer,
+      params: {
+        from: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+      },
+    },
+  },
+})
+```
+
+### Factory Pattern Support
+
+Track events from dynamically created contracts (like Uniswap pools):
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes/evm'
+
+evmDecoder({
+  range: { from: '12,369,621' },
+  contracts: factory({
+    address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+    event: factoryAbi.PoolCreated,
+    parameter: 'pool',
+    database: factorySqliteDatabase({
+      path: './pools.sqlite',
+    }),
+  }),
+  events: {
+    swaps: poolAbi.Swap,
+  },
+})
+```
+
+## Supported Networks
+
+The SDK works with any EVM-compatible blockchain available through Subsquid Portal, including:
+
+- Ethereum Mainnet
+- Base
+- Arbitrum
+- Polygon
+- Optimism
+- And many more...
+
+Check the [Portal documentation](https://docs.subsquid.io/subsquid-portal/) for a complete list of supported networks.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Portal Source" icon="arrow-right" href="/evm/portal-source">
+    Learn how to create data streams
+  </Card>
+  <Card title="Event Decoder" icon="arrow-right" href="/evm/decoder">
+    Decode and filter EVM events
+  </Card>
+</CardGroup>

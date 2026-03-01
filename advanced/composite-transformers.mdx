@@ -1,0 +1,341 @@
+---
+title: Composite Transformers
+description: Combine multiple transformers to process data in parallel
+---
+
+Composite transformers allow you to run multiple transformers on the same input data and combine their outputs into a single object. This is useful for splitting complex processing logic into separate, reusable transformers.
+
+## Overview
+
+The `compositeTransformer` function combines multiple named transformers, runs them in parallel on the same input, and merges their outputs into an object.
+
+```typescript
+export function compositeTransformer<
+  In,
+  Arg extends Record<string, Transformer<any, any>>,
+  Query,
+  Res = CompositePipe<Arg>
+>(composite: Arg): Transformer<In, Res, Query>
+```
+
+## Type Definition
+
+```typescript
+export type CompositePipe<T extends Record<string, Transformer<any, any>>> = {
+  [K in keyof T]: T[K] extends Transformer<any, infer Out> ? Out : never
+}
+```
+
+The output type preserves the keys from your input transformers and maps each to its corresponding output type.
+
+## Basic Usage
+
+### Using `pipeComposite` Method
+
+```typescript
+import { PortalSource, createTransformer } from '@subsquid/pipes';
+
+const tokensTransformer = createTransformer({
+  transform: (data) => {
+    // Extract token transfers
+    return data.blocks.flatMap(b => 
+      b.transactions.filter(tx => tx.to === TOKEN_CONTRACT)
+    );
+  }
+});
+
+const nftsTransformer = createTransformer({
+  transform: (data) => {
+    // Extract NFT mints
+    return data.blocks.flatMap(b =>
+      b.logs.filter(log => log.topics[0] === MINT_TOPIC)
+    );
+  }
+});
+
+const source = new PortalSource({ /* config */ })
+  .pipeComposite({
+    tokens: tokensTransformer,
+    nfts: nftsTransformer
+  });
+
+// Output type: { tokens: Transaction[], nfts: Log[] }
+for await (const batch of source) {
+  console.log(`Found ${batch.data.tokens.length} token transfers`);
+  console.log(`Found ${batch.data.nfts.length} NFT mints`);
+}
+```
+
+### Using `compositeTransformer` Directly
+
+```typescript
+import { compositeTransformer, createTransformer } from '@subsquid/pipes';
+
+const statsTransformer = createTransformer({
+  transform: (data) => ({
+    blockCount: data.blocks.length,
+    txCount: data.blocks.reduce((acc, b) => acc + b.transactions.length, 0)
+  })
+});
+
+const addressesTransformer = createTransformer({
+  transform: (data) => {
+    const addresses = new Set();
+    for (const block of data.blocks) {
+      for (const tx of block.transactions) {
+        addresses.add(tx.from);
+        if (tx.to) addresses.add(tx.to);
+      }
+    }
+    return Array.from(addresses);
+  }
+});
+
+const combined = compositeTransformer({
+  stats: statsTransformer,
+  addresses: addressesTransformer
+});
+
+const source = new PortalSource({ /* config */ })
+  .pipe(combined);
+
+// Output type: { stats: { blockCount: number, txCount: number }, addresses: string[] }
+for await (const batch of source) {
+  console.log(`Stats:`, batch.data.stats);
+  console.log(`Unique addresses:`, batch.data.addresses.length);
+}
+```
+
+## Lifecycle Hooks
+
+All lifecycle methods are automatically forwarded to each sub-transformer:
+
+```typescript
+const transformer1 = createTransformer({
+  start: async (ctx) => {
+    console.log('Transformer 1 started');
+  },
+  transform: (data) => data.field1,
+  stop: async (ctx) => {
+    console.log('Transformer 1 stopped');
+  }
+});
+
+const transformer2 = createTransformer({
+  start: async (ctx) => {
+    console.log('Transformer 2 started');
+  },
+  transform: (data) => data.field2,
+  stop: async (ctx) => {
+  console.log('Transformer 2 stopped');
+  }
+});
+
+const composite = compositeTransformer({
+  t1: transformer1,
+  t2: transformer2
+});
+
+// When the composite runs:
+// 1. Both start() hooks are called in parallel
+// 2. Both transform() functions run in parallel for each batch
+// 3. Both stop() hooks are called in parallel
+```
+
+### Supported Lifecycle Methods
+
+- `query(ctx)` - Configure the query before streaming starts
+- `start(ctx)` - Initialize resources when streaming begins
+- `transform(data, ctx)` - Process each batch of data
+- `fork(cursor, ctx)` - Handle blockchain reorganizations
+- `stop(ctx)` - Clean up resources when streaming ends
+
+## Duplicate ID Handling
+
+If multiple transformers have the same ID, they're automatically renamed to avoid conflicts:
+
+```typescript
+const transformerA = createTransformer({
+  profiler: { id: 'filter' },
+  transform: (data) => data.transactions
+});
+
+const transformerB = createTransformer({
+  profiler: { id: 'filter' },
+  transform: (data) => data.logs
+});
+
+const composite = compositeTransformer({
+  txs: transformerA,     // ID becomes: "txs / filter"
+  logs: transformerB     // ID becomes: "logs / filter"
+});
+```
+
+## Real-World Example: Multi-Protocol Indexer
+
+```typescript
+import { PortalSource, createTransformer } from '@subsquid/pipes';
+import { ethereum } from '@subsquid/pipes-ethereum';
+
+// Uniswap V2 transformer
+const uniswapTransformer = createTransformer({
+  profiler: { id: 'uniswap-v2' },
+  transform: (data) => {
+    const swaps = [];
+    for (const block of data.blocks) {
+      for (const log of block.logs) {
+        if (log.topics[0] === UNISWAP_SWAP_TOPIC) {
+          swaps.push({
+            blockNumber: block.header.number,
+            txHash: log.transactionHash,
+            pair: log.address,
+            // ... decode swap data
+          });
+        }
+      }
+    }
+    return swaps;
+  }
+});
+
+// Uniswap V3 transformer
+const uniswapV3Transformer = createTransformer({
+  profiler: { id: 'uniswap-v3' },
+  transform: (data) => {
+    const swaps = [];
+    for (const block of data.blocks) {
+      for (const log of block.logs) {
+        if (log.topics[0] === UNISWAP_V3_SWAP_TOPIC) {
+          swaps.push({
+            blockNumber: block.header.number,
+            txHash: log.transactionHash,
+            pool: log.address,
+            // ... decode swap data
+          });
+        }
+      }
+    }
+    return swaps;
+  }
+});
+
+// Balances transformer
+const balancesTransformer = createTransformer({
+  profiler: { id: 'track-balances' },
+  transform: (data) => {
+    const balances = new Map();
+    for (const block of data.blocks) {
+      for (const tx of block.transactions) {
+        // Update balance tracking
+      }
+    }
+    return balances;
+  }
+});
+
+const source = new PortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: ethereum.query()
+    .block({ number: true, timestamp: true })
+    .transaction({ hash: true, from: true, to: true })
+    .log({ topics: true, data: true, address: true }),
+  logger
+})
+.pipeComposite({
+  uniswapV2: uniswapTransformer,
+  uniswapV3: uniswapV3Transformer,
+  balances: balancesTransformer
+});
+
+// Type-safe access to all outputs
+for await (const batch of source) {
+  await db.insert('uniswap_v2_swaps', batch.data.uniswapV2);
+  await db.insert('uniswap_v3_swaps', batch.data.uniswapV3);
+  await updateBalances(batch.data.balances);
+}
+```
+
+## Performance Considerations
+
+<Tip>
+  All transformers in a composite run **sequentially** on each batch, not in true parallel. However, lifecycle hooks (`start`, `stop`, `query`, `fork`) execute in parallel using `Promise.all`.
+</Tip>
+
+### Transform Execution Order
+
+```typescript
+// The implementation runs transforms sequentially:
+for (const key in composite) {
+  result[key] = await composite[key].transform(data, ctx);
+}
+```
+
+This means if you have transformers that could benefit from true parallelization, consider processing batches yourself:
+
+```typescript
+const composite = compositeTransformer({
+  transformer1,
+  transformer2
+});
+
+// Instead of using composite for heavy processing,
+// consider running transformers independently:
+const [result1, result2] = await Promise.all([
+  transformer1.transform(data, ctx),
+  transformer2.transform(data, ctx)
+]);
+```
+
+## Combining with Regular Pipes
+
+You can mix composite transformers with regular transformers:
+
+```typescript
+const source = new PortalSource({ /* config */ })
+  .pipe(normalizeData)  // Regular transformer
+  .pipeComposite({
+    tokens: tokenTransformer,
+    nfts: nftTransformer
+  })  // Composite transformer
+  .pipe(enrichData);  // Regular transformer on composite output
+```
+
+## Type Safety
+
+The composite transformer preserves full type information:
+
+```typescript
+type MyData = { blocks: Block[] };
+
+const t1 = createTransformer<MyData, string[]>({
+  transform: (data) => data.blocks.map(b => b.hash)
+});
+
+const t2 = createTransformer<MyData, number>({
+  transform: (data) => data.blocks.length
+});
+
+const composite = compositeTransformer({
+  hashes: t1,
+  count: t2
+});
+
+// Inferred type: Transformer<MyData, { hashes: string[], count: number }>
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Separation of Concerns" icon="layer-group">
+    Use composite transformers to separate different processing concerns (e.g., tokens, NFTs, balances).
+  </Card>
+  <Card title="Reusability" icon="recycle">
+    Create reusable transformers that can be used independently or in composites.
+  </Card>
+  <Card title="Clear Naming" icon="tag">
+    Use descriptive keys in the composite object for better type hints and debugging.
+  </Card>
+  <Card title="Profiler IDs" icon="chart-line">
+    Set meaningful profiler IDs to track performance of individual transformers.
+  </Card>
+</CardGroup>

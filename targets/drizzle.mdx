@@ -1,0 +1,676 @@
+---
+title: Drizzle Target
+description: Store blockchain data in PostgreSQL with automatic rollback support
+---
+
+The Drizzle target provides a PostgreSQL storage solution with Drizzle ORM and automatic rollback capabilities using database snapshots.
+
+## Installation
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install @subsquid/pipes drizzle-orm pg
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash
+    pnpm add @subsquid/pipes drizzle-orm pg
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash
+    yarn add @subsquid/pipes drizzle-orm pg
+    ```
+  </Tab>
+  <Tab title="bun">
+    ```bash
+    bun add @subsquid/pipes drizzle-orm pg
+    ```
+  </Tab>
+</Tabs>
+
+## Quick Start
+
+Here's a complete example indexing ERC20 transfers to PostgreSQL:
+
+```typescript
+import { commonAbis, evmDecoder, evmPortalSource } from '@subsquid/pipes/evm'
+import { drizzleTarget, chunk } from '@subsquid/pipes/targets/drizzle/node-postgres'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { integer, numeric, pgTable, primaryKey, timestamp, varchar } from 'drizzle-orm/pg-core'
+
+// Define your schema using Drizzle ORM
+export const transfersTable = pgTable(
+  'transfers',
+  {
+    blockNumber: integer().notNull(),
+    logIndex: integer().notNull(),
+    transactionIndex: integer().notNull(),
+    from: varchar().notNull(),
+    to: varchar().notNull(),
+    amount: numeric({ mode: 'bigint' }).notNull(),
+    createdAt: timestamp(),
+  },
+  (table) => [{
+    primaryKey: {
+      columns: [table.blockNumber, table.transactionIndex, table.logIndex],
+    },
+  }],
+)
+
+type NewTransfer = typeof transfersTable.$inferInsert
+
+// Create the indexer
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: '0' },
+      events: {
+        transfers: commonAbis.erc20.events.Transfer,
+      },
+    }),
+  )
+  .pipeTo(
+    drizzleTarget({
+      db: drizzle('postgresql://postgres:postgres@localhost:5432/postgres'),
+      tables: [transfersTable],
+      onData: async ({ tx, data, ctx }) => {
+        ctx.logger.debug(`Processing batch with ${data.transfers.length} transfer events...`)
+        
+        for (const values of chunk(data.transfers)) {
+          await tx.insert(transfersTable).values(
+            values.map((d): NewTransfer => ({
+              blockNumber: d.block.number,
+              logIndex: d.rawEvent.logIndex,
+              transactionIndex: d.rawEvent.transactionIndex,
+              from: d.event.from,
+              to: d.event.to,
+              amount: d.event.value,
+              createdAt: d.timestamp,
+            })),
+          )
+        }
+      },
+    }),
+  )
+```
+
+## API Reference
+
+### `drizzleTarget(options)`
+
+Creates a PostgreSQL target using Drizzle ORM with automatic rollback table creation.
+
+<ParamField path="options" type="object" required>
+  Configuration object for the Drizzle target
+  
+  <Expandable title="properties">
+    <ParamField path="db" type="NodePgDatabase" required>
+      Drizzle database instance created with `drizzle(connectionString)`
+    </ParamField>
+    
+    <ParamField path="tables" type="Table[] | Record<string, Table>" required>
+      Array or record of Drizzle tables that will be tracked for rollbacks.
+      
+      **Important:** Every table you modify in `onData` MUST be listed here, or the target will throw an error.
+    </ParamField>
+    
+    <ParamField path="onData" type="function" required>
+      Callback invoked for each batch of processed data
+      
+      ```typescript
+      async ({ tx, data, ctx }: {
+        tx: Transaction
+        data: T
+        ctx: Ctx
+      }) => void
+      ```
+      
+      <Expandable title="parameters">
+        <ParamField path="tx" type="Transaction">
+          Drizzle transaction instance for database operations
+        </ParamField>
+        <ParamField path="data" type="T">
+          The decoded data from your pipe (e.g., events, transactions)
+        </ParamField>
+        <ParamField path="ctx" type="Ctx">
+          Context object with logger and profiler
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="onStart" type="function">
+      Optional callback invoked once before processing starts
+      
+      ```typescript
+      async ({ db }: { db: NodePgDatabase }) => void
+      ```
+      
+      Use this to create tables or perform initialization.
+    </ParamField>
+    
+    <ParamField path="onBeforeRollback" type="function">
+      Optional callback invoked before a rollback is performed
+      
+      ```typescript
+      async ({ tx, cursor }: {
+        tx: Transaction
+        cursor: BlockCursor
+      }) => void
+      ```
+    </ParamField>
+    
+    <ParamField path="onAfterRollback" type="function">
+      Optional callback invoked after a rollback is performed
+      
+      ```typescript
+      async ({ tx, cursor }: {
+        tx: Transaction
+        cursor: BlockCursor
+      }) => void
+      ```
+    </ParamField>
+    
+    <ParamField path="settings" type="object">
+      Optional configuration for state management and transactions
+      
+      <Expandable title="properties">
+        <ParamField path="state" type="StateOptions">
+          State management options (table name, schema, etc.)
+        </ParamField>
+        <ParamField path="transaction.isolationLevel" type="string" default="serializable">
+          Transaction isolation level. Options:
+          - `'read uncommitted'`
+          - `'read committed'`
+          - `'repeatable read'`
+          - `'serializable'` (default)
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `chunk(data, size?)`
+
+Splits an array into chunks to avoid PostgreSQL's parameter limit (32,767).
+
+<ParamField path="data" type="T[]" required>
+  Array of records to split into chunks
+</ParamField>
+
+<ParamField path="size" type="number">
+  Optional custom chunk size. If not provided or exceeds max-allowed size, will use calculated max size based on the number of columns.
+</ParamField>
+
+**Returns:** Generator yielding chunks of the original array
+
+```typescript
+for (const values of chunk(data.transfers)) {
+  await tx.insert(table).values(values)
+}
+```
+
+## Complete Example
+
+### 1. Define Your Schema
+
+Create a schema file using Drizzle ORM:
+
+```typescript schema.ts
+import { integer, numeric, pgTable, primaryKey, timestamp, varchar } from 'drizzle-orm/pg-core'
+
+export const transfersTable = pgTable(
+  'transfers',
+  {
+    blockNumber: integer().notNull(),
+    logIndex: integer().notNull(),
+    transactionIndex: integer().notNull(),
+    from: varchar().notNull(),
+    to: varchar().notNull(),
+    amount: numeric({ mode: 'bigint' }).notNull(),
+    createdAt: timestamp(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.blockNumber, table.transactionIndex, table.logIndex],
+    }),
+  ],
+)
+
+export type NewTransfer = typeof transfersTable.$inferInsert
+```
+
+### 2. Create the Indexer
+
+```typescript indexer.ts
+import { commonAbis, evmDecoder, evmPortalSource } from '@subsquid/pipes/evm'
+import { drizzleTarget, chunk } from '@subsquid/pipes/targets/drizzle/node-postgres'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { transfersTable, type NewTransfer } from './schema'
+
+const DB_URL = 'postgresql://postgres:postgres@localhost:5432/postgres'
+
+async function main() {
+  await evmPortalSource({
+    portal: {
+      url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    },
+  })
+    .pipe(
+      evmDecoder({
+        range: { from: '0' },
+        events: {
+          transfers: commonAbis.erc20.events.Transfer,
+        },
+      }),
+    )
+    .pipeTo(
+      drizzleTarget({
+        db: drizzle(DB_URL),
+        tables: [transfersTable],
+        onStart: async ({ db }) => {
+          // Create tables (use Drizzle Kit migrations in production)
+          await db.execute(`
+            CREATE TABLE IF NOT EXISTS "transfers" (
+              "blockNumber" integer NOT NULL,
+              "logIndex" integer NOT NULL,
+              "transactionIndex" integer NOT NULL,
+              "from" varchar NOT NULL,
+              "to" varchar NOT NULL,
+              "amount" numeric NOT NULL,
+              "createdAt" timestamp,
+              CONSTRAINT "transfers_pk" PRIMARY KEY ("blockNumber", "transactionIndex", "logIndex")
+            );
+          `)
+        },
+        onData: async ({ tx, data, ctx }) => {
+          ctx.logger.debug(`Processing ${data.transfers.length} transfers`)
+          
+          for (const values of chunk(data.transfers)) {
+            ctx.logger.debug(`Inserting ${values.length} transfers`)
+            
+            await tx.insert(transfersTable).values(
+              values.map((d): NewTransfer => ({
+                blockNumber: d.block.number,
+                logIndex: d.rawEvent.logIndex,
+                transactionIndex: d.rawEvent.transactionIndex,
+                from: d.event.from,
+                to: d.event.to,
+                amount: d.event.value,
+                createdAt: d.timestamp,
+              })),
+            )
+          }
+        },
+      }),
+    )
+}
+
+main()
+```
+
+## How Automatic Rollbacks Work
+
+The Drizzle target provides **automatic rollback support** through PostgreSQL triggers and snapshot tables:
+
+### 1. Snapshot Creation
+
+For each table you specify in the `tables` array, the target:
+
+1. Creates a corresponding `{table_name}__snapshots` table
+2. Sets up PostgreSQL triggers that capture all INSERT, UPDATE, and DELETE operations
+3. Stores snapshots with metadata: block number, operation type, and original row data
+
+### 2. Fork Detection
+
+When a blockchain reorganization is detected:
+
+1. The target identifies which blocks need to be reverted
+2. Queries the snapshot tables for all changes made in those blocks
+3. Reverts changes in reverse chronological order
+4. Cleans up snapshot data beyond the fork point
+
+### 3. Zero Configuration
+
+You don't need to implement rollback logic manually. Just list your tables:
+
+```typescript
+drizzleTarget({
+  db: drizzle(connectionString),
+  tables: [transfersTable, balancesTable, accountsTable], // All tracked automatically
+  onData: async ({ tx, data }) => {
+    // Your normal insert/update/delete logic
+    await tx.insert(transfersTable).values(data)
+  },
+})
+```
+
+<Warning>
+**Important:** Every table you modify in `onData` MUST be included in the `tables` array. If you forget a table, the target will throw an error when you try to modify it.
+</Warning>
+
+## Using Transactions
+
+All operations in `onData` run within a transaction:
+
+```typescript
+onData: async ({ tx, data, ctx }) => {
+  // All these operations are atomic
+  await tx.insert(transfersTable).values(transfers)
+  await tx.insert(balancesTable).values(balances)
+  await tx.update(accountsTable)
+    .set({ lastActivity: new Date() })
+    .where(eq(accountsTable.address, address))
+  
+  // If any operation fails, everything rolls back
+}
+```
+
+### Transaction Configuration
+
+You can configure transaction isolation level:
+
+```typescript
+drizzleTarget({
+  db: drizzle(connectionString),
+  tables: [transfersTable],
+  settings: {
+    transaction: {
+      isolationLevel: 'serializable', // Default
+      // Options: 'read uncommitted' | 'read committed' | 'repeatable read' | 'serializable'
+    },
+  },
+  onData: async ({ tx, data }) => {
+    // ...
+  },
+})
+```
+
+## Managing Large Inserts
+
+PostgreSQL has a parameter limit of **32,767** per query. Use the `chunk()` utility:
+
+```typescript
+import { chunk } from '@subsquid/pipes/targets/drizzle/node-postgres'
+
+onData: async ({ tx, data }) => {
+  // Bad: May exceed parameter limit
+  // await tx.insert(table).values(data.transfers) // ❌
+  
+  // Good: Automatically chunks to stay within limits
+  for (const values of chunk(data.transfers)) {
+    await tx.insert(table).values(values) // ✅
+  }
+}
+```
+
+The `chunk()` function automatically calculates the optimal chunk size based on:
+- Number of columns in your data
+- PostgreSQL's parameter limit
+- Your custom size (if provided)
+
+## Schema Management
+
+### Development
+
+For quick prototyping, create tables in `onStart`:
+
+```typescript
+onStart: async ({ db }) => {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS transfers (
+      -- your schema
+    )
+  `)
+}
+```
+
+<Warning>
+Direct table creation is only suitable for development. For production, use Drizzle Kit migrations.
+</Warning>
+
+### Production
+
+Use [Drizzle Kit](https://orm.drizzle.team/kit-docs/overview) for migrations:
+
+```bash
+# Generate migrations from schema
+npx drizzle-kit generate:pg
+
+# Apply migrations
+npx drizzle-kit push:pg
+```
+
+## Rollback Hooks
+
+Customize rollback behavior with hooks:
+
+```typescript
+drizzleTarget({
+  db: drizzle(connectionString),
+  tables: [transfersTable],
+  onBeforeRollback: async ({ tx, cursor }) => {
+    console.log(`Rolling back to block ${cursor.number}`)
+    // Optional: Log rollback event
+    await tx.insert(rollbackEventsTable).values({
+      timestamp: new Date(),
+      blockNumber: cursor.number,
+    })
+  },
+  onAfterRollback: async ({ tx, cursor }) => {
+    console.log(`Rollback complete. Safe block: ${cursor.number}`)
+    // Optional: Recalculate aggregations
+    await recalculateAggregations(tx, cursor.number)
+  },
+  onData: async ({ tx, data }) => {
+    // ...
+  },
+})
+```
+
+## State Management
+
+The target automatically manages indexer state in a PostgreSQL table:
+
+```typescript
+drizzleTarget({
+  db: drizzle(connectionString),
+  tables: [transfersTable],
+  settings: {
+    state: {
+      table: 'sqd_indexer_state',  // State table name
+      schema: 'public',             // Schema name
+    },
+  },
+  onData: async ({ tx, data }) => {
+    // ...
+  },
+})
+```
+
+<Note>
+The state table is created automatically. You don't need to define it in your schema.
+</Note>
+
+## Performance Optimization
+
+### Batch Size
+
+The portal source sends data in batches. Larger batches = fewer transactions:
+
+```typescript
+evmPortalSource({
+  portal: {
+    url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    maxBytes: 1024 * 1024 * 10, // 10MB batches for better throughput
+  },
+})
+```
+
+### Indexes
+
+Add indexes for common query patterns:
+
+```sql
+-- Index for time-range queries
+CREATE INDEX idx_transfers_block ON transfers(block_number);
+
+-- Index for address queries
+CREATE INDEX idx_transfers_from ON transfers(from);
+CREATE INDEX idx_transfers_to ON transfers(to);
+
+-- Composite index for filtered queries
+CREATE INDEX idx_transfers_from_block ON transfers(from, block_number);
+```
+
+### Connection Pooling
+
+Use a connection pool for better performance:
+
+```typescript
+import { Pool } from 'pg'
+import { drizzle } from 'drizzle-orm/node-postgres'
+
+const pool = new Pool({
+  connectionString: DB_URL,
+  max: 20, // Maximum pool size
+})
+
+const db = drizzle(pool)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always list all modified tables">
+    Every table you insert, update, or delete in `onData` must be in the `tables` array:
+    
+    ```typescript
+    drizzleTarget({
+      tables: [
+        transfersTable,
+        balancesTable,    // ✅ Listed
+        accountsTable,    // ✅ Listed
+      ],
+      onData: async ({ tx, data }) => {
+        await tx.insert(transfersTable).values(data)
+        await tx.insert(balancesTable).values(balances)
+        await tx.update(accountsTable).set({ ... })
+      },
+    })
+    ```
+  </Accordion>
+  
+  <Accordion title="Use chunk() for large datasets">
+    Always use `chunk()` when inserting many rows:
+    
+    ```typescript
+    for (const values of chunk(data.transfers)) {
+      await tx.insert(table).values(values)
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Define primary keys">
+    Always define primary keys for proper deduplication and rollbacks:
+    
+    ```typescript
+    pgTable('transfers', { ... }, (table) => [
+      primaryKey({
+        columns: [table.blockNumber, table.txIndex, table.logIndex],
+      }),
+    ])
+    ```
+  </Accordion>
+  
+  <Accordion title="Use Drizzle Kit in production">
+    Manage schema changes with migrations, not direct SQL:
+    
+    ```bash
+    npx drizzle-kit generate:pg
+    npx drizzle-kit push:pg
+    ```
+  </Accordion>
+  
+  <Accordion title="Monitor snapshot table size">
+    Snapshot tables grow over time. Monitor their size and adjust retention:
+    
+    ```sql
+    SELECT 
+      schemaname,
+      tablename,
+      pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+    FROM pg_tables
+    WHERE tablename LIKE '%__snapshots'
+    ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Table not tracked for rollbacks error">
+    This error occurs when you try to modify a table that isn't in the `tables` array:
+    
+    ```
+    Error: Table "my_table" is not tracked for rollbacks.
+    ```
+    
+    **Solution:** Add the table to the `tables` array:
+    
+    ```typescript
+    drizzleTarget({
+      tables: [transfersTable, myTable], // Add missing table
+      // ...
+    })
+    ```
+  </Accordion>
+  
+  <Accordion title="Parameter limit exceeded">
+    ```
+    Error: bind message has 40000 parameter formats but 0 parameters
+    ```
+    
+    **Solution:** Use the `chunk()` utility:
+    
+    ```typescript
+    for (const values of chunk(data.transfers)) {
+      await tx.insert(table).values(values)
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Connection errors">
+    Ensure PostgreSQL is running and accessible:
+    
+    ```bash
+    # Test connection
+    psql postgresql://postgres:postgres@localhost:5432/postgres
+    ```
+    
+    Check connection string format and credentials.
+  </Accordion>
+  
+  <Accordion title="Slow performance">
+    - Increase batch size in portal source
+    - Add database indexes for query patterns
+    - Use connection pooling
+    - Check PostgreSQL resource usage (CPU, memory, disk I/O)
+    - Monitor snapshot table size
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="ClickHouse Target" icon="database" href="/targets/clickhouse">
+    Learn about the ClickHouse target for analytics workloads
+  </Card>
+  <Card title="Custom Target" icon="wrench" href="/targets/custom">
+    Build your own target implementation
+  </Card>
+</CardGroup>

@@ -1,0 +1,310 @@
+---
+title: 'clickhouseTarget()'
+description: 'Create a ClickHouse database target for pipeline data'
+---
+
+## Overview
+
+Creates a target that writes pipeline data to a ClickHouse database. This target manages connection lifecycle, state persistence, and fork handling automatically.
+
+<Note>
+  `createClickhouseTarget()` is deprecated. Use `clickhouseTarget()` instead.
+</Note>
+
+## Signature
+
+```typescript
+function clickhouseTarget<T>(options: {
+  client: ClickHouseClient
+  settings?: Settings
+  onStart?: (ctx: { store: ClickhouseStore; logger: Logger }) => unknown | Promise<unknown>
+  onData: (ctx: { store: ClickhouseStore; data: T; ctx: Ctx }) => unknown | Promise<unknown>
+  onRollback?: (ctx: {
+    type: 'offset_check' | 'blockchain_fork'
+    store: ClickhouseStore
+    safeCursor: BlockCursor
+    cursor: BlockCursor
+  }) => unknown | Promise<unknown>
+}): Target<T>
+```
+
+## Parameters
+
+<ParamField path="client" type="ClickHouseClient" required>
+  ClickHouse client instance from `@clickhouse/client`.
+</ParamField>
+
+<ParamField path="settings" type="Settings">
+  Configuration for state management.
+  
+  <Expandable title="properties">
+    <ResponseField name="database" type="string" default="default">
+      Name of the ClickHouse database to use.
+    </ResponseField>
+    <ResponseField name="table" type="string">
+      Name of the table to store offset data.
+    </ResponseField>
+    <ResponseField name="id" type="string" default="stream">
+      Stream identifier used to isolate offset records within the same table.
+    </ResponseField>
+    <ResponseField name="maxRows" type="number" default={10000}>
+      Maximum number of rows to retain per unique stream ID in the offset table. Older rows beyond this count will be removed.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="onStart" type="function">
+  Optional callback that runs before processing starts.
+  
+  ```typescript
+  (ctx: { store: ClickhouseStore; logger: Logger }) => unknown | Promise<unknown>
+  ```
+  
+  Use this to create tables or perform other initialization tasks.
+</ParamField>
+
+<ParamField path="onData" type="function" required>
+  Callback that processes each batch of data.
+  
+  ```typescript
+  (ctx: { store: ClickhouseStore; data: T; ctx: Ctx }) => unknown | Promise<unknown>
+  ```
+  
+  **Context properties:**
+  - `store`: ClickhouseStore instance for executing queries
+  - `data`: Transformed data from the pipeline
+  - `ctx.logger`: Logger instance
+  - `ctx.profiler`: Profiler for measuring performance
+</ParamField>
+
+<ParamField path="onRollback" type="function">
+  Optional callback that runs when a rollback is needed.
+  
+  ```typescript
+  (ctx: {
+    type: 'offset_check' | 'blockchain_fork'
+    store: ClickhouseStore
+    safeCursor: BlockCursor
+    cursor: BlockCursor
+  }) => unknown | Promise<unknown>
+  ```
+  
+  **Context properties:**
+  - `type`: Reason for rollback (`'offset_check'` on startup, `'blockchain_fork'` when fork detected)
+  - `store`: ClickhouseStore instance
+  - `safeCursor`: Safe block cursor to roll back to
+  - `cursor`: (Deprecated) Use `safeCursor` instead
+</ParamField>
+
+## Returns
+
+Returns a `Target<T>` instance that can be used as the final stage of a pipeline.
+
+## Example
+
+### Basic usage
+
+```typescript
+import { clickhouseTarget } from '@subsquid/pipes'
+import { createClient } from '@clickhouse/client'
+
+const client = createClient({
+  host: process.env.CLICKHOUSE_HOST,
+  database: 'my_database'
+})
+
+const target = clickhouseTarget({
+  client,
+  onData: async ({ store, data }) => {
+    await store.execute(`
+      INSERT INTO transfers (block_number, from_address, to_address, amount)
+      VALUES ${data.map(t => `(${t.blockNumber}, '${t.from}', '${t.to}', ${t.amount})`).join(', ')}
+    `)
+  }
+})
+```
+
+### With table creation
+
+```typescript
+const target = clickhouseTarget({
+  client,
+  onStart: async ({ store, logger }) => {
+    logger.info('Creating tables...')
+    
+    await store.execute(`
+      CREATE TABLE IF NOT EXISTS transfers (
+        block_number UInt64,
+        timestamp DateTime,
+        from_address String,
+        to_address String,
+        amount UInt256,
+        tx_hash String
+      ) ENGINE = MergeTree()
+      ORDER BY (block_number, timestamp)
+    `)
+  },
+  onData: async ({ store, data }) => {
+    if (data.length === 0) return
+    
+    await store.execute(`
+      INSERT INTO transfers
+      VALUES ${data.map(t => 
+        `(${t.blockNumber}, ${t.timestamp}, '${t.from}', '${t.to}', ${t.amount}, '${t.txHash}')`
+      ).join(', ')}
+    `)
+  }
+})
+```
+
+### With fork handling
+
+```typescript
+const target = clickhouseTarget({
+  client,
+  settings: {
+    database: 'blockchain_data',
+    table: 'pipeline_state',
+    id: 'ethereum-transfers',
+    maxRows: 5000
+  },
+  onData: async ({ store, data, ctx }) => {
+    if (data.length === 0) return
+    
+    await ctx.profiler.measure('insert transfers', async () => {
+      await store.execute(`
+        INSERT INTO transfers
+        VALUES ${data.map(t => 
+          `(${t.blockNumber}, ${t.timestamp}, '${t.from}', '${t.to}', ${t.amount})`
+        ).join(', ')}
+      `)
+    })
+  },
+  onRollback: async ({ type, store, safeCursor }) => {
+    console.log(`Rolling back to block ${safeCursor.number} due to ${type}`)
+    
+    // Delete data from blocks higher than the safe cursor
+    await store.execute(`
+      DELETE FROM transfers
+      WHERE block_number > ${safeCursor.number}
+    `)
+  }
+})
+```
+
+### Complete pipeline
+
+```typescript
+import { 
+  evmPortalSource,
+  EvmQueryBuilder,
+  createTransformer,
+  clickhouseTarget
+} from '@subsquid/pipes'
+import { createClient } from '@clickhouse/client'
+
+const client = createClient({
+  host: process.env.CLICKHOUSE_HOST,
+  database: 'ethereum'
+})
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/ethereum',
+  query: new EvmQueryBuilder()
+    .addFields({
+      block: { number: true, timestamp: true },
+      log: { address: true, topics: true, data: true }
+    })
+    .addLog({
+      range: { from: 0 },
+      request: {
+        address: ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'] // USDC
+      }
+    })
+})
+
+const transform = createTransformer({
+  transform: (data) => {
+    return data.blocks.flatMap(block =>
+      block.logs.map(log => ({
+        blockNumber: block.header.number,
+        timestamp: block.header.timestamp,
+        address: log.address,
+        topics: log.topics,
+        data: log.data
+      }))
+    )
+  }
+})
+
+const target = clickhouseTarget({
+  client,
+  onStart: async ({ store }) => {
+    await store.execute(`
+      CREATE TABLE IF NOT EXISTS usdc_logs (
+        block_number UInt64,
+        timestamp UInt64,
+        address String,
+        topics Array(String),
+        data String
+      ) ENGINE = MergeTree()
+      ORDER BY block_number
+    `)
+  },
+  onData: async ({ store, data }) => {
+    if (data.length === 0) return
+    
+    await store.execute(`
+      INSERT INTO usdc_logs
+      VALUES ${data.map(l => 
+        `(${l.blockNumber}, ${l.timestamp}, '${l.address}', ['${l.topics.join("','")}''], '${l.data}')`
+      ).join(', ')}
+    `)
+  }
+})
+
+source.pipe(transform).pipe(target).start()
+```
+
+## ClickhouseStore API
+
+The `ClickhouseStore` instance provided in callbacks has the following methods:
+
+### execute()
+
+Execute a ClickHouse query.
+
+```typescript
+await store.execute(query: string): Promise<void>
+```
+
+### query()
+
+Execute a query and return results.
+
+```typescript
+const results = await store.query(query: string): Promise<any[]>
+```
+
+### close()
+
+Close the ClickHouse connection. This is called automatically when the pipeline completes.
+
+```typescript
+await store.close(): Promise<void>
+```
+
+## State Management
+
+The ClickHouse target automatically manages pipeline state:
+
+- Stores the current block cursor after each batch
+- Resumes from the last saved position on restart
+- Handles blockchain forks by rolling back to a safe block
+- Prunes old state records based on `maxRows` setting
+
+## Related
+
+- [drizzleTarget()](/api/targets/drizzle) - PostgreSQL target with Drizzle ORM
+- [Custom Targets](/targets/custom) - Create custom target implementations
+- [Fork Handling](/core/fork-handling) - Learn about blockchain fork detection

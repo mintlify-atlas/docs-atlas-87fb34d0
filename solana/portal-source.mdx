@@ -1,0 +1,264 @@
+---
+title: Solana Portal Source
+description: Stream Solana blockchain data using the Portal network
+---
+
+The `solanaPortalSource()` function creates a data source that streams Solana blockchain data from the Subsquid Portal network. It provides high-performance access to blocks, transactions, instructions, logs, and other on-chain data.
+
+## Function Signature
+
+```typescript
+function solanaPortalSource<F extends solana.FieldSelection = any>({
+  portal: string | PortalClientOptions
+  query?: PortalRange | SolanaQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+}): PortalSource<SolanaQueryBuilder<F>, SolanaPortalData<F>>
+```
+
+## Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions" required>
+  Portal endpoint URL or configuration object. Use `https://portal.sqd.dev/datasets/solana-mainnet` for Solana mainnet.
+</ParamField>
+
+<ParamField path="query" type="PortalRange | SolanaQueryBuilder<F>">
+  Query configuration. Can be a simple range (e.g., `{ from: 340000000 }`) or a `SolanaQueryBuilder` for advanced queries. If omitted, starts from block 0.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Optional caching configuration for portal data.
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Optional metrics server for monitoring.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level (`'debug'`, `'info'`, `'warn'`, `'error'`).
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Progress tracking configuration with `interval`, `onStart`, and `onProgress` callbacks.
+</ParamField>
+
+## Return Type
+
+```typescript
+type SolanaPortalData<F extends solana.FieldSelection> = { 
+  blocks: solana.Block<F>[] 
+}
+```
+
+Returns a `PortalSource` that yields batches of Solana blocks with the requested fields.
+
+## Basic Usage
+
+### Stream All Blocks
+
+```typescript
+import { solanaPortalSource } from '@subsquid/pipes/solana'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 340_000_000 },
+})
+
+for await (const { data } of stream) {
+  console.log(`Received ${data.blocks.length} blocks`)
+  
+  for (const block of data.blocks) {
+    console.log(`Block ${block.header.number}`)
+  }
+}
+```
+
+### Start from Latest Block
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 'latest' },
+})
+```
+
+### Specify Block Range
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { 
+    from: 340_000_000,
+    to: 350_000_000,
+  },
+})
+```
+
+## Advanced Usage
+
+### Using Query Builder
+
+```typescript
+import { solanaPortalSource, SolanaQueryBuilder } from '@subsquid/pipes/solana'
+
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+      hash: true,
+    },
+    transaction: {
+      signatures: true,
+    },
+  })
+  .addInstruction({
+    range: { from: 340_000_000 },
+    request: {
+      programId: ['whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc'],
+      isCommitted: true,
+      transaction: true,
+    },
+  })
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query,
+})
+```
+
+### With Progress Tracking
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 340_000_000 },
+  progress: {
+    interval: 10_000, // Log progress every 10k blocks
+    onStart: (ctx) => {
+      console.log(`Starting from block ${ctx.range.from}`)
+    },
+    onProgress: (ctx) => {
+      console.log(`Processed up to block ${ctx.currentBlock}`)
+    },
+  },
+})
+```
+
+### With Custom Logger
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 340_000_000 },
+  logger: 'debug', // 'debug' | 'info' | 'warn' | 'error'
+})
+```
+
+### Monitoring Indexing Latency
+
+This example tracks indexing latency by comparing Portal data arrival with RPC:
+
+```typescript
+import { solanaPortalSource, solanaRpcLatencyWatcher } from '@subsquid/pipes/solana'
+import { formatBlock } from '@subsquid/pipes'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 'latest' },
+}).pipe(
+  solanaRpcLatencyWatcher({
+    rpcUrl: ['https://api.mainnet-beta.solana.com'],
+  }).pipe({
+    profiler: { id: 'expose metrics' },
+    transform: (data, { metrics }) => {
+      if (!data) return
+      
+      // Update latency metric for each RPC endpoint
+      for (const rpc of data.rpc) {
+        metrics
+          .gauge({
+            name: 'rpc_latency_ms',
+            help: 'RPC Latency in ms',
+            labelNames: ['url'],
+          })
+          .set({ url: rpc.url }, rpc.portalDelayMs)
+      }
+      
+      return data
+    },
+  })
+)
+
+for await (const { data } of stream) {
+  if (!data) continue
+  
+  console.log(`Block: ${formatBlock(data.number)} / ${data.timestamp}`)
+  console.table(data.rpc)
+}
+```
+
+## Composing with Transformers
+
+The portal source can be composed with transformers using the `.pipe()` method:
+
+```typescript
+import { solanaPortalSource, solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import * as orcaWhirlpool from './abi/orca_whirlpool'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+    },
+  })
+)
+```
+
+## Using pipeComposite
+
+For multiple decoders, use `.pipeComposite()` to create a composite stream:
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipeComposite({
+  orcaSwaps: solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+    },
+  }),
+  raydiumSwaps: solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: raydiumAmm.programId,
+    instructions: {
+      swapBaseIn: raydiumAmm.instructions.swapBaseIn,
+    },
+  }),
+})
+
+for await (const { data } of stream) {
+  console.log(`Orca swaps: ${data.orcaSwaps.swap.length}`)
+  console.log(`Raydium swaps: ${data.raydiumSwaps.swapBaseIn.length}`)
+}
+```
+
+## Performance Considerations
+
+- Use specific field selections to reduce data transfer
+- Set appropriate block ranges to avoid processing unnecessary data
+- Enable caching for repeated queries
+- Use progress tracking for long-running indexing tasks
+
+## Related
+
+- [Query Builder](/solana/query-builder) - Build advanced queries
+- [Instruction Decoder](/solana/instruction-decoder) - Decode program instructions

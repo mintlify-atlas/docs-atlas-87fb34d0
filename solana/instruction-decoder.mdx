@@ -1,0 +1,342 @@
+---
+title: Solana Instruction Decoder
+description: Decode Solana program instructions using ABIs
+---
+
+The `solanaInstructionDecoder()` function creates a transformer that decodes Solana program instructions using ABI definitions. It automatically filters instructions by program ID and discriminator, decodes the instruction data, and provides structured access to accounts, data, and related context.
+
+## Function Signature
+
+```typescript
+function solanaInstructionDecoder<T extends Instructions>({
+  range: PortalRange
+  programId: string | string[]
+  instructions: InstructionsArgs<T>
+  profiler?: ProfilerOptions
+  onError?: (ctx: BatchCtx, error: any) => unknown | Promise<unknown>
+}): SolanaTransformer<SolanaPortalData<F>, EventResponse<T>>
+```
+
+## Parameters
+
+<ParamField path="range" type="PortalRange" required>
+  Block range to decode instructions from. Example: `{ from: 340000000 }` or `{ from: 340000000, to: 350000000 }`
+</ParamField>
+
+<ParamField path="programId" type="string | string[]" required>
+  Program ID(s) to filter instructions. Can be a single program ID or an array for multiple programs.
+</ParamField>
+
+<ParamField path="instructions" type="InstructionsArgs<T>" required>
+  Object mapping instruction names to ABI instruction definitions. Each instruction must have a discriminator (`d1`, `d2`, `d4`, or `d8`) and a `decode()` method.
+</ParamField>
+
+<ParamField path="profiler" type="ProfilerOptions">
+  Optional profiler configuration. Defaults to `{ id: 'instruction decoder' }`.
+</ParamField>
+
+<ParamField path="onError" type="(ctx: BatchCtx, error: any) => unknown | Promise<unknown>">
+  Error handler for decoding failures. By default, throws the error.
+</ParamField>
+
+## Return Type
+
+```typescript
+type EventResponse<T extends Instructions> = {
+  [K in keyof T]: DecodedInstruction<T[K]>[]
+}
+
+type DecodedInstruction<D> = {
+  instruction: D  // Decoded instruction data
+  programId: string
+  blockNumber: number
+  timestamp: Date
+  transaction: Transaction
+  innerInstructions: Instruction[]
+  rawInstruction: Instruction
+  tokenBalances: TokenBalance[]
+}
+```
+
+Returns an object where each key corresponds to an instruction name, and the value is an array of decoded instructions with full context.
+
+## Basic Usage
+
+### Decode Single Instruction Type
+
+```typescript
+import { solanaPortalSource, solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import * as orcaWhirlpool from './abi/orca_whirlpool'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+    },
+  })
+)
+
+for await (const { data } of stream) {
+  for (const swap of data.swap) {
+    console.log('Swap instruction:', {
+      block: swap.blockNumber,
+      timestamp: swap.timestamp,
+      programId: swap.programId,
+      amount: swap.instruction.data.amount,
+      aToB: swap.instruction.data.aToB,
+      accounts: swap.instruction.accounts,
+    })
+  }
+}
+```
+
+### Decode Multiple Instruction Types
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+      swapV2: orcaWhirlpool.instructions.swapV2,
+      increaseLiquidity: orcaWhirlpool.instructions.increaseLiquidity,
+      decreaseLiquidity: orcaWhirlpool.instructions.decreaseLiquidity,
+    },
+  })
+)
+
+for await (const { data } of stream) {
+  console.log(`Swaps: ${data.swap.length}`)
+  console.log(`Swaps V2: ${data.swapV2.length}`)
+  console.log(`Increase Liquidity: ${data.increaseLiquidity.length}`)
+  console.log(`Decrease Liquidity: ${data.decreaseLiquidity.length}`)
+}
+```
+
+## Advanced Usage
+
+### Multiple Programs with pipeComposite
+
+Decode instructions from multiple programs simultaneously:
+
+```typescript
+import { solanaPortalSource, solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import * as orcaWhirlpool from './abi/orca_whirlpool'
+import * as raydiumAmm from './abi/raydium-amm'
+import * as raydiumClmm from './abi/raydium-clmm'
+
+const from = '340,000,000'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipeComposite({
+  orcaWhirlpool: solanaInstructionDecoder({
+    range: { from },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+      swapV2: orcaWhirlpool.instructions.swapV2,
+    },
+  }),
+  raydiumAmm: solanaInstructionDecoder({
+    range: { from },
+    programId: raydiumAmm.programId,
+    instructions: {
+      swapBaseIn: raydiumAmm.instructions.swapBaseIn,
+      swapBaseOut: raydiumAmm.instructions.swapBaseOut,
+    },
+  }),
+  raydiumClmm: solanaInstructionDecoder({
+    range: { from },
+    programId: raydiumClmm.programId,
+    instructions: {
+      swap: raydiumClmm.instructions.swap,
+      swapV2: raydiumClmm.instructions.swapV2,
+    },
+  }),
+})
+
+for await (const { data } of stream) {
+  console.log(`Orca swaps: ${data.orcaWhirlpool.swap.length}`)
+  console.log(`Raydium AMM swaps: ${data.raydiumAmm.swapBaseIn.length + data.raydiumAmm.swapBaseOut.length}`)
+  console.log(`Raydium CLMM swaps: ${data.raydiumClmm.swap.length}`)
+}
+```
+
+### Custom Error Handling
+
+```typescript
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+    },
+    onError: (ctx, error) => {
+      console.error('Failed to decode instruction:', error)
+      // Continue processing instead of throwing
+    },
+  })
+)
+```
+
+### Access Inner Instructions and Token Balances
+
+```typescript
+for await (const { data } of stream) {
+  for (const swap of data.swap) {
+    console.log('Swap details:', {
+      block: swap.blockNumber,
+      signature: swap.transaction.signatures[0],
+      
+      // Access decoded instruction data
+      amount: swap.instruction.data.amount,
+      aToB: swap.instruction.data.aToB,
+      
+      // Access instruction accounts
+      tokenAuthority: swap.instruction.accounts.tokenAuthority,
+      whirlpool: swap.instruction.accounts.whirlpool,
+      
+      // Access inner instructions
+      innerInstructionCount: swap.innerInstructions.length,
+      
+      // Access token balance changes
+      tokenBalances: swap.tokenBalances.map(tb => ({
+        account: tb.account,
+        preMint: tb.preMint,
+        preAmount: tb.preAmount,
+        postMint: tb.postMint,
+        postAmount: tb.postAmount,
+      })),
+    })
+  }
+}
+```
+
+## ABI Instruction Format
+
+ABI instructions must follow this structure:
+
+```typescript
+import { instruction } from './abi.support'
+import { struct, u64, u128, bool } from '@subsquid/borsh'
+
+export interface Swap {
+  amount: bigint
+  otherAmountThreshold: bigint
+  sqrtPriceLimit: bigint
+  amountSpecifiedIsInput: boolean
+  aToB: boolean
+}
+
+export const swap = instruction(
+  {
+    d8: '0xf8c69e91e17587c8',  // 8-byte discriminator
+  },
+  {
+    tokenProgram: 0,
+    tokenAuthority: 1,
+    whirlpool: 2,
+    tokenOwnerAccountA: 3,
+    tokenVaultA: 4,
+    tokenOwnerAccountB: 5,
+    tokenVaultB: 6,
+    tickArray0: 7,
+    tickArray1: 8,
+    tickArray2: 9,
+    oracle: 10,
+  },
+  struct({
+    amount: u64,
+    otherAmountThreshold: u64,
+    sqrtPriceLimit: u128,
+    amountSpecifiedIsInput: bool,
+    aToB: bool,
+  })
+)
+```
+
+### Discriminator Types
+
+Instructions can use different discriminator sizes:
+
+- `d1`: 1-byte discriminator
+- `d2`: 2-byte discriminator
+- `d4`: 4-byte discriminator
+- `d8`: 8-byte discriminator (most common for Anchor programs)
+
+## Decoded Instruction Fields
+
+Each decoded instruction provides:
+
+<ResponseField name="instruction" type="DecodedInstructionData">
+  The decoded instruction data containing `accounts` and `data` fields based on the ABI definition.
+</ResponseField>
+
+<ResponseField name="programId" type="string">
+  The program ID that executed this instruction.
+</ResponseField>
+
+<ResponseField name="blockNumber" type="number">
+  The block number containing this instruction.
+</ResponseField>
+
+<ResponseField name="timestamp" type="Date">
+  The block timestamp as a JavaScript Date object.
+</ResponseField>
+
+<ResponseField name="transaction" type="Transaction">
+  The parent transaction containing this instruction, including signatures and transaction index.
+</ResponseField>
+
+<ResponseField name="innerInstructions" type="Instruction[]">
+  Array of inner (CPI) instructions executed by this instruction.
+</ResponseField>
+
+<ResponseField name="rawInstruction" type="Instruction">
+  The raw instruction data including instruction address and raw bytes.
+</ResponseField>
+
+<ResponseField name="tokenBalances" type="TokenBalance[]">
+  Token balance changes in the transaction, including pre/post amounts and decimals.
+</ResponseField>
+
+## Error Handling
+
+By default, decoding errors will throw and stop the stream. Use the `onError` callback to handle errors gracefully:
+
+```typescript
+solanaInstructionDecoder({
+  range: { from: 340_000_000 },
+  programId: orcaWhirlpool.programId,
+  instructions: {
+    swap: orcaWhirlpool.instructions.swap,
+  },
+  onError: async (ctx, error) => {
+    // Log and continue
+    console.error(`Decode error at block ${ctx.currentBlock}:`, error)
+  },
+})
+```
+
+## Performance Tips
+
+- Only include instructions you need in the `instructions` object
+- Use `pipeComposite()` for multiple decoders to avoid redundant Portal queries
+- Set appropriate block ranges to avoid processing unnecessary data
+- Use profiler to identify bottlenecks
+
+## Related
+
+- [Portal Source](/solana/portal-source) - Stream Solana data
+- [Query Builder](/solana/query-builder) - Build advanced queries

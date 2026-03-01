@@ -1,0 +1,503 @@
+---
+title: Portal Sources
+description: Stream blockchain data from Subsquid Portal with Portal Sources
+---
+
+## Overview
+
+Portal Sources are the entry point of every Subsquid Pipes pipeline. They connect to the **Subsquid Portal** network to stream blockchain data in real-time, handling pagination, retries, and cursor management automatically.
+
+## Creating a Portal Source
+
+The `PortalSource` class is the core abstraction, but you'll typically use chain-specific factories:
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+const source = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  query: {
+    from: 18_000_000,
+    to: 18_100_000
+  }
+})
+```
+
+## Portal Configuration
+
+The `portal` option accepts three forms:
+
+### 1. String URL (Simplest)
+
+```typescript
+evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet'
+})
+```
+
+### 2. Portal Client Options
+
+Provide advanced configuration:
+
+```typescript
+evmPortalSource({
+  portal: {
+    url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    finalized: true, // Only stream finalized blocks
+    http: {
+      retryAttempts: 10,
+      retrySchedule: [100, 500, 1000], // Retry delays in ms
+      headers: {
+        'X-Custom-Header': 'value'
+      }
+    }
+  }
+})
+```
+
+### 3. Portal Client Instance
+
+Reuse a client across multiple sources:
+
+```typescript
+import { PortalClient } from '@subsquid/pipes/portal-client'
+
+const client = new PortalClient({
+  url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  http: {
+    retryAttempts: 5
+  }
+})
+
+const source1 = evmPortalSource({ portal: client, query: {...} })
+const source2 = evmPortalSource({ portal: client, query: {...} })
+```
+
+## Query Configuration
+
+Queries define what data to fetch from the Portal:
+
+```typescript
+evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  query: {
+    // Block range
+    from: 18_000_000,
+    to: 18_100_000,
+    
+    // Or use special values
+    from: 'latest', // Start from chain head
+    
+    // Filter by log topics
+    logs: [{
+      address: ['0x...'],
+      topic0: ['0x...']
+    }],
+    
+    // Include specific fields
+    includeAllBlocks: true // Get blocks even without logs/transactions
+  }
+})
+```
+
+<Note>
+Query structure is chain-specific. EVM queries differ from Solana or other chains. Check the chain-specific documentation for details.
+</Note>
+
+## Source Options
+
+**Type definition from source:**
+```typescript
+// portal-source.ts:88-101
+type PortalSourceOptions<Query> = {
+  portal: string | PortalClientOptions | PortalClient
+  query: Query
+  logger: Logger
+  profiler?: boolean
+  cache?: PortalCache
+  transformers?: Transformer<any, any>[]
+  metrics?: MetricsServer
+  progress?: {
+    interval?: number
+    onStart?: (data: StartState) => void
+    onProgress?: (progress: ProgressState) => void
+  }
+}
+```
+
+### Profiling
+
+Enable performance profiling:
+
+```typescript
+evmPortalSource({
+  portal: '...',
+  profiler: true // Defaults to true in development
+})
+```
+
+The profiler tracks:
+- Batch processing time
+- Network request duration  
+- Transformer execution time
+
+### Progress Tracking
+
+Monitor indexing progress:
+
+```typescript
+evmPortalSource({
+  portal: '...',
+  progress: {
+    interval: 5000, // Update every 5 seconds
+    onStart: (state) => {
+      console.log(`Starting from block ${state.current?.number || state.initial}`)
+    },
+    onProgress: (progress) => {
+      console.log(`Progress: ${progress.percent}% (${progress.current}/${progress.last})`)
+      console.log(`ETA: ${progress.etaSeconds}s`)
+    }
+  }
+})
+```
+
+### Custom Logger
+
+```typescript
+import pino from 'pino'
+
+const logger = pino({ level: 'debug' })
+
+evmPortalSource({
+  portal: '...',
+  logger
+})
+```
+
+### Metrics Server
+
+Expose Prometheus metrics:
+
+```typescript
+import { createMetricsServer } from '@subsquid/pipes/core'
+
+const metrics = createMetricsServer({ port: 3000 })
+
+evmPortalSource({
+  portal: '...',
+  metrics
+})
+```
+
+Metrics endpoint will be available at `http://localhost:3000/metrics`.
+
+## Data Streaming
+
+Portal sources implement async iteration:
+
+```typescript
+for await (const batch of source) {
+  console.log(`Batch: ${batch.data.blocks.length} blocks`)
+  console.log(`Current: ${batch.ctx.state.current.number}`)
+  console.log(`Finalized: ${batch.ctx.head.finalized?.number}`)
+}
+```
+
+### Batch Structure
+
+Each batch contains:
+
+```typescript
+type PortalBatch<T> = {
+  data: T,           // Chain-specific data (blocks, logs, transactions)
+  ctx: BatchCtx      // Metadata and utilities
+}
+```
+
+**From source code:**
+```typescript
+// portal-source.ts:68
+type PortalBatch<T = any> = { data: T; ctx: BatchCtx }
+```
+
+### Batch Context Fields
+
+The `ctx` object provides rich metadata:
+
+```typescript
+for await (const { data, ctx } of source) {
+  // State tracking
+  ctx.state.current       // { number, hash, timestamp }
+  ctx.state.initial       // Starting block number
+  ctx.state.last          // Final block number in range
+  ctx.state.rollbackChain // Unfinalized blocks (for fork handling)
+  
+  // Chain head info
+  ctx.head.finalized      // Latest finalized block
+  ctx.head.latest         // Latest known block
+  
+  // Performance metrics
+  ctx.meta.bytesSize      // Batch size in bytes
+  ctx.meta.requests       // HTTP status code counts
+  ctx.meta.lastBlockReceivedAt // Timestamp
+  
+  // Query information
+  ctx.query.url           // Portal URL
+  ctx.query.hash          // Query content hash
+  ctx.query.raw           // Full query object
+}
+```
+
+## Cursor Management
+
+Portal sources automatically track progress using cursors:
+
+```typescript
+type BlockCursor = {
+  number: number
+  hash?: string
+  timestamp?: number
+}
+```
+
+**From source code:**
+```typescript
+// types.ts:6-10
+type BlockCursor = {
+  number: number
+  hash?: string
+  timestamp?: number
+}
+```
+
+Cursors enable:
+- Resuming from the last processed block
+- Fork detection and rollback
+- Progress tracking
+
+### Resuming from Cursor
+
+Targets can pass a cursor to resume processing:
+
+```typescript
+const target = createTarget({
+  write: async ({ read }) => {
+    const lastCursor = await loadLastCursor()
+    
+    // Resume from saved position
+    for await (const batch of read(lastCursor)) {
+      await process(batch.data)
+      await saveCursor(batch.ctx.state.current)
+    }
+  }
+})
+```
+
+## Real-time vs Finalized Streaming
+
+### Real-time Mode (Default)
+
+Streams blocks as they're produced, including unfinalized blocks:
+
+```typescript
+evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet'
+})
+```
+
+<Warning>
+Real-time mode includes unfinalized blocks that may be reorganized. Always implement fork handling for production use.
+</Warning>
+
+### Finalized-only Mode
+
+Only streams finalized blocks (no reorganizations):
+
+```typescript
+evmPortalSource({
+  portal: {
+    url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    finalized: true
+  }
+})
+```
+
+<Note>
+Finalized mode has higher latency but eliminates the need for fork handling. Some datasets may not support real-time streaming - check the warning in logs.
+</Note>
+
+## Portal Caching
+
+Implement custom caching to reduce Portal requests:
+
+```typescript
+import { PortalCache } from '@subsquid/pipes/core'
+
+const cache: PortalCache = {
+  getStream: ({ portal, query, logger }) => {
+    // Return cached stream or fetch from portal
+    return cachedStream || portal.getStream(query)
+  }
+}
+
+evmPortalSource({
+  portal: '...',
+  cache
+})
+```
+
+**Type definition from source:**
+```typescript
+// portal-source.ts:31-33
+interface PortalCache {
+  getStream<Q extends Query>(options: {
+    portal: PortalClient
+    query: Q
+    logger: Logger
+  }): PortalStream<GetBlock<Q>>
+}
+```
+
+## Error Handling
+
+### Automatic Retries
+
+Portal sources retry failed requests automatically:
+
+```typescript
+evmPortalSource({
+  portal: {
+    url: '...',
+    http: {
+      retryAttempts: 10,              // Max retry attempts
+      retrySchedule: [100, 500, 1000] // Delay schedule (ms)
+    }
+  }
+})
+```
+
+**From source code:**
+```typescript
+// portal-source.ts:126-127
+http: {
+  logger,
+  retryAttempts: Number.MAX_SAFE_INTEGER, // Default: infinite retries
+}
+```
+
+### Fork Detection
+
+When a fork is detected, Portal returns a `409` status:
+
+```typescript
+// This error is thrown automatically and caught by pipeTo()
+try {
+  for await (const batch of source) {
+    // process
+  }
+} catch (e) {
+  if (isForkException(e)) {
+    console.log('Fork detected at block', e.blockNumber)
+    console.log('Previous blocks:', e.previousBlocks)
+  }
+}
+```
+
+See [Fork Handling](/core/fork-handling) for how to handle this correctly.
+
+## Lifecycle Hooks
+
+Portal sources manage transformer lifecycle automatically:
+
+```typescript
+const source = evmPortalSource({ portal: '...' })
+
+source.pipe({
+  // Called once before streaming starts
+  start: async (ctx) => {
+    console.log('Starting from block', ctx.state.current?.number)
+  },
+  
+  // Called for each batch
+  transform: (data, ctx) => {
+    return processData(data)
+  },
+  
+  // Called once when streaming ends
+  stop: async (ctx) => {
+    console.log('Streaming complete')
+  },
+  
+  // Called when a fork is detected
+  fork: async (cursor, ctx) => {
+    console.log('Rolling back to', cursor.number)
+  }
+})
+```
+
+## Best Practices
+
+### Performance
+
+- Use specific queries to reduce data transfer
+- Enable caching for frequently accessed ranges
+- Configure appropriate retry schedules
+- Use finalized mode when real-time isn't required
+
+### Reliability
+
+- Always implement fork handling in production
+- Save cursors frequently to enable resume
+- Monitor the `rollbackChain` length
+- Set up proper error logging
+
+### Example: Production Configuration
+
+```typescript
+import pino from 'pino'
+import { createMetricsServer } from '@subsquid/pipes/core'
+
+const logger = pino({ level: 'info' })
+const metrics = createMetricsServer({ port: 3000 })
+
+const source = evmPortalSource({
+  portal: {
+    url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    http: {
+      retryAttempts: 20,
+      retrySchedule: [100, 500, 1000, 5000]
+    }
+  },
+  query: {
+    from: 18_000_000,
+    logs: [{
+      address: ['0x...'],
+      topic0: ['0x...']
+    }]
+  },
+  logger,
+  metrics,
+  profiler: true,
+  progress: {
+    interval: 10000,
+    onProgress: (p) => logger.info(`Progress: ${p.percent}%`)
+  }
+})
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Transformers" icon="arrows-rotate" href="/core/transformers">
+    Transform streamed data with pipe()
+  </Card>
+  <Card title="Fork Handling" icon="code-fork" href="/core/fork-handling">
+    Handle blockchain reorganizations
+  </Card>
+  <Card title="EVM Sources" icon="ethereum" href="/evm/portal-source">
+    EVM-specific query options
+  </Card>
+  <Card title="Targets" icon="floppy-disk" href="/core/targets">
+    Persist processed data
+  </Card>
+</CardGroup>

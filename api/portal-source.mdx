@@ -1,0 +1,256 @@
+---
+title: 'portalSource()'
+description: 'Create a Portal data source for streaming blockchain data'
+---
+
+## Overview
+
+The `PortalSource` class provides a streaming interface for fetching blockchain data from Subsquid Portal. It supports transformations, fork handling, and progress tracking.
+
+## Constructor
+
+```typescript
+new PortalSource<Q extends QueryBuilder<any>, T = any>(options: PortalSourceOptions<Q>)
+```
+
+<ParamField path="options" type="PortalSourceOptions<Q>" required>
+  Configuration options for the Portal source
+
+  <ParamField path="portal" type="string | PortalClientOptions | PortalClient" required>
+    Portal connection configuration. Can be:
+    - A URL string (e.g., `"https://portal.subsquid.io"`)
+    - A `PortalClientOptions` object for custom configuration
+    - An existing `PortalClient` instance
+  </ParamField>
+
+  <ParamField path="query" type="QueryBuilder" required>
+    Query builder instance that defines what data to fetch from the Portal
+  </ParamField>
+
+  <ParamField path="logger" type="Logger" required>
+    Pino logger instance for logging operations
+  </ParamField>
+
+  <ParamField path="profiler" type="boolean">
+    Enable performance profiling. Defaults to `true` in development, `false` in production
+  </ParamField>
+
+  <ParamField path="cache" type="PortalCache">
+    Optional cache implementation for Portal streams
+  </ParamField>
+
+  <ParamField path="transformers" type="Transformer<any, any>[]">
+    Array of transformers to apply to the data
+  </ParamField>
+
+  <ParamField path="metrics" type="MetricsServer">
+    Metrics server for collecting performance metrics
+  </ParamField>
+
+  <ParamField path="progress" type="object">
+    Progress tracking configuration
+    
+    <ParamField path="interval" type="number">
+      Progress update interval in milliseconds
+    </ParamField>
+    
+    <ParamField path="onStart" type="(data: StartState) => void">
+      Callback invoked when streaming starts
+    </ParamField>
+    
+    <ParamField path="onProgress" type="(progress: ProgressState) => void">
+      Callback invoked on progress updates
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+## Methods
+
+### pipe()
+
+Chain a transformer to process batches of data.
+
+```typescript
+pipe<Out>(
+  transformerOrOptions: 
+    | TransformerOptions<T, Out, Q>['transform']
+    | TransformerOptions<T, Out, Q>
+    | Transformer<T, Out, Q>
+): PortalSource<Q, Out>
+```
+
+<ParamField path="transformerOrOptions" required>
+  Can be one of:
+  - A transform function: `(data) => transformedData`
+  - A `TransformerOptions` object with `transform` and optional lifecycle hooks
+  - A `Transformer` instance
+</ParamField>
+
+<ResponseField name="return" type="PortalSource<Q, Out>">
+  A new PortalSource instance with the transformer applied
+</ResponseField>
+
+### pipeComposite()
+
+Apply multiple named transformers in parallel.
+
+```typescript
+pipeComposite<Arg extends Record<string, Transformer<any, any>>>(
+  composite: Arg
+): PortalSource<Q, CompositePipe<Arg>>
+```
+
+<ParamField path="composite" type="Record<string, Transformer>" required>
+  Object mapping names to transformer instances
+</ParamField>
+
+<ResponseField name="return" type="PortalSource<Q, CompositePipe<Arg>>">
+  A new PortalSource with composite transformation applied
+</ResponseField>
+
+### pipeTo()
+
+Connect the source to a target for writing data.
+
+```typescript
+pipeTo(target: Target<T>): Promise<void>
+```
+
+<ParamField path="target" type="Target<T>" required>
+  Target implementation that receives and processes batches
+</ParamField>
+
+<ResponseField name="return" type="Promise<void>">
+  Promise that resolves when all data has been processed
+</ResponseField>
+
+### [Symbol.asyncIterator]
+
+The PortalSource is an async iterable, allowing iteration with `for await...of`.
+
+```typescript
+[Symbol.asyncIterator](): AsyncIterator<PortalBatch<T>>
+```
+
+<ResponseField name="return" type="AsyncIterator<PortalBatch<T>>">
+  Async iterator yielding Portal batches
+</ResponseField>
+
+## Types
+
+### PortalBatch
+
+```typescript
+type PortalBatch<T = any> = {
+  data: T
+  ctx: BatchCtx
+}
+```
+
+<ResponseField name="data" type="T">
+  The transformed batch data
+</ResponseField>
+
+<ResponseField name="ctx" type="BatchCtx">
+  Batch context containing metadata, state, and utilities
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { PortalSource } from '@subsquid/pipes'
+import { logger } from './logger'
+import { query } from './query'
+
+const source = new PortalSource({
+  portal: 'https://portal.subsquid.io',
+  query,
+  logger,
+})
+
+// Iterate over batches
+for await (const batch of source) {
+  console.log('Received blocks:', batch.data.blocks.length)
+  console.log('Current block:', batch.ctx.state.current.number)
+}
+```
+
+### With Transformers
+
+```typescript
+const source = new PortalSource({
+  portal: 'https://portal.subsquid.io',
+  query,
+  logger,
+})
+  .pipe((data) => {
+    // Transform blocks
+    return data.blocks.map(block => ({
+      number: block.header.number,
+      timestamp: block.header.timestamp,
+    }))
+  })
+  .pipe({
+    profiler: { id: 'filter-recent' },
+    transform: (blocks) => {
+      // Filter to recent blocks
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000
+      return blocks.filter(b => b.timestamp && b.timestamp > oneDayAgo)
+    },
+  })
+
+for await (const batch of source) {
+  console.log('Recent blocks:', batch.data.length)
+}
+```
+
+### With Target
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+
+const target = createTarget({
+  async write({ read, logger }) {
+    for await (const batch of read()) {
+      // Process and save data
+      await database.save(batch.data)
+      
+      logger.info(`Processed block ${batch.ctx.state.current.number}`)
+    }
+  },
+  async fork(previousBlocks) {
+    // Handle blockchain fork
+    const rollbackTo = previousBlocks[0]
+    await database.rollback(rollbackTo.number)
+    return rollbackTo
+  },
+})
+
+await source.pipeTo(target)
+```
+
+### With Progress Tracking
+
+```typescript
+const source = new PortalSource({
+  portal: 'https://portal.subsquid.io',
+  query,
+  logger,
+  progress: {
+    interval: 5000, // Update every 5 seconds
+    onStart: (state) => {
+      console.log('Starting from block:', state.current?.number || 0)
+    },
+    onProgress: (progress) => {
+      console.log(`Progress: ${progress.percentage}%`)
+      console.log(`Blocks processed: ${progress.processedBlocks}`)
+    },
+  },
+})
+
+for await (const batch of source) {
+  // Process batches...
+}
+```

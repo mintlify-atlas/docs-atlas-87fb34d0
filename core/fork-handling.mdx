@@ -1,0 +1,619 @@
+---
+title: Fork Handling
+description: Handle blockchain reorganizations and rollbacks correctly
+---
+
+## Overview
+
+Blockchain **forks** (reorganizations) occur when the canonical chain changes, invalidating previously processed blocks. Subsquid Pipes provides built-in fork detection and recovery mechanisms to ensure data consistency.
+
+<Warning>
+**Production Requirement**: All real-time pipelines that process unfinalized blocks MUST implement fork handling. Without it, your data will become inconsistent during chain reorganizations.
+</Warning>
+
+## What is a Fork?
+
+A fork happens when:
+1. You process block N with hash `0xAAA`
+2. The chain reorganizes
+3. Block N now has hash `0xBBB`
+
+Your processed data for `0xAAA` is now invalid and must be rolled back.
+
+```
+Original chain:    ... -> Block 99 -> Block 100 (0xAAA) -> Block 101 (0xCCC)
+Reorganized chain: ... -> Block 99 -> Block 100 (0xBBB) -> Block 101 (0xDDD)
+                                               ^
+                                               Different hash!
+```
+
+## Fork Detection
+
+Subsquid Portal automatically detects forks and returns a **409 Conflict** response:
+
+```typescript
+// Portal client automatically throws ForkException
+import { isForkException } from '@subsquid/pipes/portal-client'
+
+try {
+  for await (const batch of source) {
+    // Process batches
+  }
+} catch (error) {
+  if (isForkException(error)) {
+    console.log('Fork detected at block', error.blockNumber)
+    console.log('Valid chain:', error.previousBlocks)
+  }
+}
+```
+
+### When Forks Are Detected
+
+Portal detects a fork when:
+- You request block N+1 with `parentBlockHash` = `0xAAA`
+- But the actual parent of block N+1 is `0xBBB`
+
+**From test code:**
+```typescript
+// portal-source.test.ts:239-294
+{
+  statusCode: 409,
+  data: {
+    previousBlocks: [
+      { number: 99_999_999, hash: '0x99999999__1' },
+      { number: 100_000_000, hash: '0x100000000__1' }
+    ]
+  },
+  validateRequest: (req) => {
+    expect(req).toMatchObject({
+      fromBlock: 100_000_001,
+      parentBlockHash: '0x100000000' // ❌ Wrong hash!
+    })
+  }
+}
+```
+
+## Rollback Chain
+
+To enable fork recovery, the pipeline tracks **unfinalized blocks** in a rollback chain:
+
+```typescript
+for await (const batch of source) {
+  // Unfinalized blocks for potential rollback
+  const rollbackChain = batch.ctx.state.rollbackChain
+  
+  console.log('Unfinalized blocks:', rollbackChain.length)
+  console.log('Finalized block:', batch.ctx.head.finalized?.number)
+}
+```
+
+**Type definition:**
+```typescript
+// portal-source.ts:48-49
+rollbackChain: BlockCursor[]
+// List of block cursors representing unfinalized blocks in chronological order.
+// Used for handling blockchain forks by tracking alternative chain versions
+// and enabling rollback to a valid chain state when a fork is detected.
+```
+
+### How Rollback Chain is Built
+
+**From source code:**
+```typescript
+// portal-source.ts:76-86
+function extractRollbackChain({ blocks, head }: {
+  blocks: PartialBlock[]
+  head?: BlockCursor
+}): BlockCursor[] {
+  if (!head) return []
+  if (!blocks.length) return []
+
+  return blocks
+    .filter((b) => b.header.number > head.number) // Only unfinalized
+    .map(cursorFromHeader)
+}
+```
+
+Blocks **above** the finalized height are saved for potential rollback.
+
+## Implementing Fork Handling
+
+### Target with Fork Support
+
+Targets must implement the `fork` hook:
+
+```typescript
+import { createTarget, resolveForkCursor } from '@subsquid/pipes/core'
+
+const target = createTarget({
+  write: async ({ read, logger }) => {
+    for await (const batch of read()) {
+      // Save rollback chain with each batch
+      await saveRollbackRecord({
+        rollbackChain: batch.ctx.state.rollbackChain,
+        finalized: batch.ctx.head.finalized
+      })
+      
+      await saveData(batch.data)
+      await saveCursor(batch.ctx.state.current)
+    }
+  },
+  
+  fork: async (previousBlocks) => {
+    logger.warn(`Fork detected, rolling back...`)
+    
+    // Load historical rollback records (newest first)
+    const records = await loadRollbackRecords()
+    
+    // Find the safe cursor
+    const safeCursor = await resolveForkCursor(records, previousBlocks)
+    
+    if (!safeCursor) {
+      throw new Error('Cannot resolve fork - no common ancestor found')
+    }
+    
+    // Rollback database to safe block
+    await deleteDataAfter(safeCursor.number)
+    
+    logger.info(`Rolled back to block ${safeCursor.number}`)
+    
+    return safeCursor
+  }
+})
+```
+
+### The resolveForkCursor Helper
+
+This helper finds the **common ancestor** between your saved rollback chains and Portal's valid chain:
+
+**Type signature from source:**
+```typescript
+// fork.ts:18-21
+async function resolveForkCursor(
+  records: AsyncIterable<RollbackRecord> | Iterable<RollbackRecord>,
+  previousBlocks: BlockCursor[]
+): Promise<BlockCursor | null>
+
+type RollbackRecord = {
+  rollbackChain: BlockCursor[]
+  finalized?: BlockCursor
+}
+```
+
+**Algorithm from source:**
+```typescript
+// fork.ts:18-61
+// Walks through each record's rollback chain (sorted DESC by block number)
+// and looks for the latest block that both sides agree on (matching hash).
+// Returns the safe cursor, or null if no common ancestor is found.
+```
+
+### Example: ClickHouse Fork Handling
+
+```typescript
+import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
+import { createClient } from '@clickhouse/client'
+
+const client = createClient({ url: 'http://localhost:8123' })
+
+await source
+  .pipe(decoder)
+  .pipeTo(
+    clickhouseTarget({
+      client,
+      settings: {
+        table: 'sync', // Stores rollback chains
+        database: 'default'
+      },
+      onData: async ({ data, ctx }) => {
+        // Insert transfers
+        await client.insert({
+          table: 'transfers',
+          values: data.transfers,
+          format: 'JSONEachRow'
+        })
+      },
+      onRollback: async ({ from, to, ctx }) => {
+        // Delete forked data
+        ctx.logger.warn(`Deleting blocks ${from.number} to ${to.number}`)
+        
+        await client.query({
+          query: `
+            DELETE FROM transfers
+            WHERE block_number > ${from.number}
+            AND block_number <= ${to.number}
+          `
+        })
+      }
+    })
+  )
+```
+
+The ClickHouse target automatically:
+1. Saves rollback chains to the `sync` table
+2. Detects forks via the `fork` hook
+3. Calls `onRollback` to delete invalid data
+4. Returns the safe cursor to resume
+
+## Transformer Fork Handling
+
+Stateful transformers must also handle forks:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+
+let processedCount = 0
+const stateByBlock = new Map<number, number>()
+
+const statefulTransformer = createTransformer({
+  profiler: { id: 'stateful' },
+  
+  transform: (data, ctx) => {
+    processedCount += data.transfers.length
+    
+    // Save state at this block
+    stateByBlock.set(ctx.state.current.number, processedCount)
+    
+    return { ...data, totalProcessed: processedCount }
+  },
+  
+  fork: async (cursor, ctx) => {
+    ctx.logger.warn(`Transformer rolling back to ${cursor.number}`)
+    
+    // Restore state
+    const savedState = stateByBlock.get(cursor.number)
+    if (savedState !== undefined) {
+      processedCount = savedState
+    }
+    
+    // Clear future states
+    for (const [blockNum] of stateByBlock) {
+      if (blockNum > cursor.number) {
+        stateByBlock.delete(blockNum)
+      }
+    }
+  }
+})
+```
+
+**Fork hook signature:**
+```typescript
+// transformer.ts:22
+fork?: (cursor: BlockCursor, ctx: Ctx) => Promise<void> | void
+```
+
+## Fork Recovery Flow
+
+When a fork is detected, the pipeline automatically:
+
+1. **Detect**: Portal returns 409 with `previousBlocks`
+2. **Stop**: Current streaming stops
+3. **Rollback Target**: Call `target.fork(previousBlocks)`
+4. **Rollback Transformers**: Call `transformer.fork(cursor)` for each
+5. **Resume**: Restart streaming from safe cursor
+
+**From source code:**
+```typescript
+// portal-source.ts:407-444
+pipeTo(target: Target<T>) {
+  return target.write({
+    read: async function* (cursor?: BlockCursor) {
+      while (true) {
+        try {
+          for await (const batch of self.read(cursor)) {
+            yield batch
+          }
+          return
+        } catch (e) {
+          if (!isForkException(e)) throw e
+
+          if (!target.fork) {
+            throw new Error('Target does not support fork')
+          }
+
+          const forkProfiler = Span.root('fork', self.#options.profiler)
+
+          // Rollback target
+          const span = forkProfiler.start('target_rollback')
+          const forkedCursor = await target.fork(e.previousBlocks)
+          span.end()
+
+          if (!forkedCursor) {
+            throw Error('Fork detected, but target did not return a new cursor')
+          }
+
+          // Rollback transformers
+          await self.forkTransformers(forkProfiler, forkedCursor)
+
+          cursor = forkedCursor
+        }
+      }
+    }
+  })
+}
+```
+
+## Rollback Record Storage
+
+### Database Storage (Recommended)
+
+```typescript
+// Schema example
+CREATE TABLE rollback_records (
+  block_number BIGINT PRIMARY KEY,
+  block_hash TEXT NOT NULL,
+  rollback_chain JSONB NOT NULL,
+  finalized_block JSONB,
+  timestamp TIMESTAMPTZ DEFAULT NOW()
+);
+
+// Save record
+async function saveRollbackRecord(record: RollbackRecord, blockNumber: number) {
+  await db.query(
+    `INSERT INTO rollback_records (block_number, rollback_chain, finalized_block)
+     VALUES ($1, $2, $3)`,
+    [blockNumber, JSON.stringify(record.rollbackChain), JSON.stringify(record.finalized)]
+  )
+}
+
+// Load records (newest first)
+async function* loadRollbackRecords(): AsyncIterable<RollbackRecord> {
+  const result = await db.query(
+    `SELECT rollback_chain, finalized_block 
+     FROM rollback_records 
+     ORDER BY block_number DESC 
+     LIMIT 100`
+  )
+  
+  for (const row of result.rows) {
+    yield {
+      rollbackChain: JSON.parse(row.rollback_chain),
+      finalized: JSON.parse(row.finalized_block)
+    }
+  }
+}
+```
+
+### In-Memory Storage (Testing)
+
+```typescript
+const rollbackRecords: RollbackRecord[] = []
+
+const target = createTarget({
+  write: async ({ read }) => {
+    for await (const batch of read()) {
+      // Store in memory
+      rollbackRecords.unshift({
+        rollbackChain: batch.ctx.state.rollbackChain,
+        finalized: batch.ctx.head.finalized
+      })
+      
+      // Keep last 100 records
+      if (rollbackRecords.length > 100) {
+        rollbackRecords.pop()
+      }
+      
+      await saveData(batch.data)
+    }
+  },
+  
+  fork: async (previousBlocks) => {
+    return await resolveForkCursor(rollbackRecords, previousBlocks)
+  }
+})
+```
+
+## Avoiding Forks: Finalized Mode
+
+If you don't need real-time data, use finalized-only mode:
+
+```typescript
+evmPortalSource({
+  portal: {
+    url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    finalized: true // Only finalized blocks
+  }
+})
+```
+
+<Note>
+Finalized mode has higher latency (15-20 minutes on Ethereum) but eliminates the need for fork handling.
+</Note>
+
+## Deep Forks
+
+For very deep reorganizations (rare):
+
+**From source code:**
+```typescript
+// fork.ts:42-47
+if (!remaining.length) {
+  if (finalized && block.number < finalized.number) {
+    // We can't go beyond the finalized block.
+    return null
+  }
+  
+  // Deep fork: return current block as fork point
+  // and let portal fetch new valid chain
+  return block
+}
+```
+
+If no common ancestor is found in your rollback records:
+- The algorithm returns the oldest unfinalized block
+- Portal will stream the correct chain from there
+- Your target must delete all data after that point
+
+## Error Cases
+
+### No Fork Hook Implemented
+
+```typescript
+const target = createTarget({
+  write: async ({ read }) => {
+    for await (const batch of read()) {
+      await save(batch.data)
+    }
+  }
+  // ❌ No fork hook!
+})
+
+// Error when fork detected:
+// "Target does not support fork"
+```
+
+**From source code:**
+```typescript
+// portal-source.ts:422-425
+if (!target.fork) {
+  throw new Error('Target does not support fork')
+}
+```
+
+### Fork Hook Returns Null
+
+```typescript
+fork: async (previousBlocks) => {
+  return null // ❌ Invalid!
+}
+
+// Error:
+// "Fork detected, but target did not return a new cursor"
+```
+
+**From source code:**
+```typescript
+// portal-source.ts:433-435
+if (!forkedCursor) {
+  throw Error('Fork detected, but target did not return a new cursor')
+}
+```
+
+## Testing Fork Handling
+
+Simulate forks in tests:
+
+```typescript
+import { describe, it, expect } from 'vitest'
+import { createMockPortal, ForkException } from '@subsquid/pipes/testing'
+
+describe('fork handling', () => {
+  it('recovers from fork', async () => {
+    const portal = await createMockPortal([
+      {
+        statusCode: 200,
+        data: [{ header: { number: 100, hash: '0xAAA' } }]
+      },
+      {
+        statusCode: 409, // Fork!
+        data: {
+          previousBlocks: [
+            { number: 99, hash: '0x99' },
+            { number: 100, hash: '0xBBB' } // Different hash
+          ]
+        }
+      },
+      {
+        statusCode: 200,
+        data: [{ header: { number: 100, hash: '0xBBB' } }]
+      }
+    ])
+    
+    const saved: any[] = []
+    let forkHandled = false
+    
+    const target = createTarget({
+      write: async ({ read }) => {
+        for await (const batch of read()) {
+          saved.push(batch.data)
+        }
+      },
+      fork: async (previousBlocks) => {
+        forkHandled = true
+        return previousBlocks[previousBlocks.length - 1]
+      }
+    })
+    
+    await source.pipeTo(target)
+    
+    expect(forkHandled).toBe(true)
+    expect(saved).toHaveLength(2) // Original + recovery
+  })
+})
+```
+
+## Best Practices
+
+### Do's
+
+- Always implement `fork` hook for production pipelines
+- Save rollback chains with every batch
+- Test fork recovery thoroughly
+- Monitor rollback chain length (alert if > 100)
+- Log fork events for debugging
+- Use finalized mode when real-time isn't critical
+
+### Don'ts
+
+- Don't process unfinalized blocks without fork handling
+- Don't return `null` from fork hook
+- Don't skip rollback record storage
+- Don't delete finalized data during rollback
+- Don't ignore fork exceptions
+
+## Monitoring
+
+Track fork-related metrics:
+
+```typescript
+const target = createTarget({
+  write: async ({ read, logger }) => {
+    for await (const batch of read()) {
+      // Monitor rollback chain depth
+      const chainDepth = batch.ctx.state.rollbackChain.length
+      logger.debug({ chainDepth }, 'Rollback chain depth')
+      
+      if (chainDepth > 100) {
+        logger.warn('Rollback chain unusually deep!')
+      }
+      
+      await save(batch.data)
+    }
+  },
+  
+  fork: async (previousBlocks) => {
+    // Count forks
+    forkCounter.inc()
+    
+    logger.warn({
+      previousBlocks: previousBlocks.length,
+      deepestBlock: previousBlocks[0]?.number
+    }, 'Fork detected')
+    
+    const cursor = await resolveForkCursor(records, previousBlocks)
+    
+    if (cursor) {
+      logger.info({ rollbackTo: cursor.number }, 'Fork resolved')
+    }
+    
+    return cursor
+  }
+})
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Targets" icon="floppy-disk" href="/core/targets">
+    Learn more about target implementation
+  </Card>
+  <Card title="Transformers" icon="arrows-rotate" href="/core/transformers">
+    Implement stateful transformers correctly
+  </Card>
+  <Card title="Sources" icon="database" href="/core/sources">
+    Understand finalized vs real-time modes
+  </Card>
+  <Card title="ClickHouse Target" icon="database" href="/targets/clickhouse">
+    Built-in fork handling example
+  </Card>
+</CardGroup>

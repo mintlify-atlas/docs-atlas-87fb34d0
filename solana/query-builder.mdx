@@ -1,0 +1,431 @@
+---
+title: Solana Query Builder
+description: Build type-safe queries for Solana blockchain data
+---
+
+The `SolanaQueryBuilder` class provides a fluent API for constructing type-safe queries to request specific Solana blockchain data from the Portal network. It allows you to specify which data types to fetch (instructions, transactions, logs, etc.), which fields to include, and what filters to apply.
+
+## Class Definition
+
+```typescript
+class SolanaQueryBuilder<F extends solana.FieldSelection = {}> extends QueryBuilder<F, solana.DataRequest>
+```
+
+## Creating a Query Builder
+
+```typescript
+import { SolanaQueryBuilder } from '@subsquid/pipes/solana'
+
+const query = new SolanaQueryBuilder()
+```
+
+## Methods
+
+### addFields
+
+Specify which fields to include in the returned data. This method is type-safe and will only accept valid Solana field selections.
+
+```typescript
+addFields<T extends Subset<T, solana.FieldSelection>>(fields: T): SolanaQueryBuilder<F & T>
+```
+
+**Example:**
+
+```typescript
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      hash: true,
+      timestamp: true,
+    },
+    transaction: {
+      transactionIndex: true,
+      signatures: true,
+    },
+    instruction: {
+      programId: true,
+      data: true,
+      accounts: true,
+      instructionAddress: true,
+    },
+  })
+```
+
+### addInstruction
+
+Add an instruction query to fetch program instructions matching specific criteria.
+
+```typescript
+addInstruction(options: RequestOptions<solana.InstructionRequest>): this
+```
+
+**Parameters:**
+
+<ParamField path="options.range" type="Range" required>
+  Block range to query. Example: `{ from: 340000000 }` or `{ from: 340000000, to: 350000000 }`
+</ParamField>
+
+<ParamField path="options.request" type="solana.InstructionRequest" required>
+  Instruction query parameters including `programId`, discriminators, and additional options.
+</ParamField>
+
+**Instruction Request Fields:**
+
+- `programId`: Program ID(s) to filter instructions
+- `d1`, `d2`, `d4`, `d8`: Instruction discriminators (use one)
+- `isCommitted`: Only include committed instructions
+- `innerInstructions`: Include inner (CPI) instructions
+- `transaction`: Include parent transaction data
+- `transactionTokenBalances`: Include token balance changes
+
+**Example:**
+
+```typescript
+query.addInstruction({
+  range: { from: 340_000_000 },
+  request: {
+    programId: ['whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc'],
+    d8: ['0xf8c69e91e17587c8'], // Swap instruction discriminator
+    isCommitted: true,
+    innerInstructions: true,
+    transaction: true,
+    transactionTokenBalances: true,
+  },
+})
+```
+
+### addTransaction
+
+Add a transaction query to fetch transactions matching specific criteria.
+
+```typescript
+addTransaction(options: RequestOptions<solana.TransactionRequest>): this
+```
+
+**Example:**
+
+```typescript
+query.addTransaction({
+  range: { from: 340_000_000 },
+  request: {
+    feePayer: ['YourAddressHere...'],
+    isCommitted: true,
+  },
+})
+```
+
+### addLog
+
+Add a log query to fetch program logs.
+
+```typescript
+addLog(options: RequestOptions<solana.LogRequest>): this
+```
+
+**Example:**
+
+```typescript
+query.addLog({
+  range: { from: 340_000_000 },
+  request: {
+    programId: ['YourProgramId...'],
+    kind: ['data', 'invoke'],
+  },
+})
+```
+
+### addTokenBalance
+
+Add a token balance query to fetch token balance changes.
+
+```typescript
+addTokenBalance(options: RequestOptions<solana.TokenBalanceRequest>): this
+```
+
+**Example:**
+
+```typescript
+query.addTokenBalance({
+  range: { from: 340_000_000 },
+  request: {
+    account: ['TokenAccountAddress...'],
+    preMint: ['MintAddress...'],
+  },
+})
+```
+
+### addBalance
+
+Add a balance query to fetch SOL balance changes.
+
+```typescript
+addBalance(options: RequestOptions<solana.BalanceRequest>): this
+```
+
+**Example:**
+
+```typescript
+query.addBalance({
+  range: { from: 340_000_000 },
+  request: {
+    account: ['WalletAddress...'],
+  },
+})
+```
+
+### addReward
+
+Add a reward query to fetch staking and voting rewards.
+
+```typescript
+addReward(options: RequestOptions<solana.RewardRequest>): this
+```
+
+**Example:**
+
+```typescript
+query.addReward({
+  range: { from: 340_000_000 },
+  request: {
+    pubkey: ['ValidatorAddress...'],
+  },
+})
+```
+
+### includeAllBlocks
+
+Include all blocks in the specified range, even if they don't match other query criteria.
+
+```typescript
+includeAllBlocks(range?: Range): this
+```
+
+**Example:**
+
+```typescript
+query.includeAllBlocks({ from: 340_000_000 })
+```
+
+### addRange
+
+Add a block range to the query (inherited from base QueryBuilder).
+
+```typescript
+addRange(range: Range): this
+```
+
+**Example:**
+
+```typescript
+query.addRange({ from: 340_000_000, to: 350_000_000 })
+```
+
+## Complete Examples
+
+### Basic Instruction Query
+
+```typescript
+import { solanaPortalSource, SolanaQueryBuilder } from '@subsquid/pipes/solana'
+
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    instruction: {
+      programId: true,
+      data: true,
+      accounts: true,
+    },
+  })
+  .addInstruction({
+    range: { from: 340_000_000 },
+    request: {
+      programId: ['whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc'],
+      isCommitted: true,
+      transaction: true,
+    },
+  })
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query,
+})
+
+for await (const { data } of stream) {
+  for (const block of data.blocks) {
+    console.log(`Block ${block.header.number}:`, block.instructions.length)
+  }
+}
+```
+
+### Multi-Program Query
+
+```typescript
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    instruction: {
+      programId: true,
+      data: true,
+      instructionAddress: true,
+    },
+    transaction: {
+      signatures: true,
+    },
+  })
+  .addInstruction({
+    range: { from: 340_000_000 },
+    request: {
+      programId: [
+        'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc', // Orca
+        '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  // Raydium
+      ],
+      isCommitted: true,
+      innerInstructions: true,
+      transaction: true,
+      transactionTokenBalances: true,
+    },
+  })
+```
+
+### Query with Token Balances
+
+```typescript
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    tokenBalance: {
+      account: true,
+      preMint: true,
+      preAmount: true,
+      preDecimals: true,
+      postMint: true,
+      postAmount: true,
+      postDecimals: true,
+    },
+  })
+  .addTokenBalance({
+    range: { from: 340_000_000 },
+    request: {
+      account: ['YourTokenAccountAddress...'],
+    },
+  })
+```
+
+### Transaction Query with Logs
+
+```typescript
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    transaction: {
+      signatures: true,
+      fee: true,
+    },
+    log: {
+      programId: true,
+      kind: true,
+      message: true,
+    },
+  })
+  .addTransaction({
+    range: { from: 340_000_000 },
+    request: {
+      isCommitted: true,
+      logs: true,
+    },
+  })
+  .addLog({
+    range: { from: 340_000_000 },
+    request: {
+      programId: ['YourProgramId...'],
+      kind: ['data'],
+    },
+  })
+```
+
+## Field Selection
+
+The query builder uses TypeScript's type system to ensure only valid fields are selected. Available field categories:
+
+### Block Fields
+
+- `number`: Block number
+- `hash`: Block hash
+- `timestamp`: Block timestamp
+- `parentSlot`: Parent slot number
+- `parentHash`: Parent block hash
+
+### Transaction Fields
+
+- `transactionIndex`: Index within block
+- `signatures`: Transaction signatures
+- `fee`: Transaction fee
+- `err`: Error information
+- `computeUnitsConsumed`: Compute units used
+
+### Instruction Fields
+
+- `programId`: Program ID
+- `data`: Instruction data (base64)
+- `accounts`: Account addresses
+- `instructionAddress`: Hierarchical instruction address
+- `transactionIndex`: Parent transaction index
+
+### Token Balance Fields
+
+- `account`: Token account address
+- `transactionIndex`: Parent transaction index
+- `preMint`: Pre-transaction mint address
+- `preAmount`: Pre-transaction amount
+- `preDecimals`: Pre-transaction decimals
+- `postMint`: Post-transaction mint address
+- `postAmount`: Post-transaction amount
+- `postDecimals`: Post-transaction decimals
+
+### Log Fields
+
+- `programId`: Program that emitted the log
+- `kind`: Log kind (e.g., 'data', 'invoke')
+- `message`: Log message
+- `instructionAddress`: Associated instruction address
+
+## Type Safety
+
+The query builder provides full type safety. The returned data type is inferred from the fields you select:
+
+```typescript
+const query = new SolanaQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+  })
+
+// TypeScript knows that blocks will have 'number' and 'timestamp' fields
+for await (const { data } of stream) {
+  for (const block of data.blocks) {
+    const num: number = block.header.number
+    const ts: number = block.header.timestamp
+    // block.header.hash // TypeScript error - not selected
+  }
+}
+```
+
+## Related
+
+- [Portal Source](/solana/portal-source) - Use queries with Portal source
+- [Instruction Decoder](/solana/instruction-decoder) - Decode instructions

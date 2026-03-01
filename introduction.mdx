@@ -1,0 +1,112 @@
+---
+title: Introduction to Subsquid Pipes SDK
+description: A TypeScript-first toolkit for streaming blockchain data, transforming it in-flight, and delivering results to your own systems
+---
+
+# Subsquid Pipes SDK
+
+<Warning>
+The SDK is experimental. Expect rapid iteration and occasional breaking changes.
+</Warning>
+
+Subsquid Pipes is a TypeScript-first toolkit for streaming blockchain data, transforming it in-flight, and delivering the results to your own systems. It provides a composable architecture that glues together sources, transforms, and targets to create powerful data pipelines.
+
+## Key Components
+
+<CardGroup cols={2}>
+  <Card title="Portal Sources" icon="database" href="#sources">
+    Tap into managed Subsquid Portal datasets for chains like Ethereum and Solana
+  </Card>
+  <Card title="Transforms & Decoders" icon="code" href="#transforms">
+    Turn raw blocks and logs into strongly-typed TypeScript objects
+  </Card>
+  <Card title="Database Targets" icon="server" href="#targets">
+    Persist or forward processed data to ClickHouse, PostgreSQL, and more
+  </Card>
+  <Card title="Observability" icon="chart-line" href="#observability">
+    Built-in profiling, structured logging, and Prometheus metrics
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Every pipeline is described as a composition of pieces via the `pipe()` helper. You can run the same code in CLIs, backend services, or any Node.js environment:
+
+```typescript
+const stream = evmPortalSource({ portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet' })
+  .pipe(evmDecoder({ events: { transfers: commonAbis.erc20.events.Transfer } }))
+  .pipeTo(clickhouseTarget({ client, onData: async ({ data }) => { /* process */ } }))
+```
+
+## Sources
+
+Sources connect to Subsquid Portal datasets to stream blockchain data:
+
+- **EVM chains**: Ethereum, Base, Polygon, Arbitrum, and more
+- **Solana**: Mainnet and devnet
+- **Hyperliquid**: DEX data
+
+All sources provide consistent streaming interfaces with automatic batching and checkpoint management.
+
+## Transforms
+
+Transforms decode raw blockchain data into typed objects:
+
+- **EVM Decoder**: Decode events, transactions, and traces using ABIs
+- **Solana Decoder**: Parse instructions, accounts, and program data
+- **Custom Transforms**: Build your own transformation logic with the pipe API
+
+Every decoder supports filtering by block range, contract addresses, and event signatures.
+
+## Targets
+
+Targets persist or forward your processed data:
+
+- **ClickHouse**: High-performance analytical database with automatic offset management
+- **PostgreSQL**: Via Drizzle ORM for type-safe schema definitions
+- **Custom Targets**: Implement your own sink by extending the `createTarget` API
+
+All targets handle fork reconciliation and provide transactional semantics.
+
+## Observability
+
+Built-in tools for production monitoring:
+
+- **Profiler**: Measure performance of each pipeline stage
+- **Structured Logging**: Built on Pino for high-performance logging
+- **Prometheus Metrics**: Export metrics for monitoring and alerting
+- **Custom Metrics**: Add your own application-specific metrics
+
+## Supported Chains
+
+<CardGroup cols={3}>
+  <Card title="Ethereum" icon="ethereum">
+    Mainnet and all major testnets
+  </Card>
+  <Card title="Solana" icon="S">
+    Mainnet and devnet
+  </Card>
+  <Card title="Base" icon="B">
+    Layer 2 scaling solution
+  </Card>
+  <Card title="Polygon" icon="hexagon">
+    Mainnet and zkEVM
+  </Card>
+  <Card title="Arbitrum" icon="circle">
+    One and Nova networks
+  </Card>
+  <Card title="Hyperliquid" icon="H">
+    Perpetual DEX data
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the SDK with npm, yarn, or pnpm
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first pipeline in 5 minutes
+  </Card>
+</CardGroup>

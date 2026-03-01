@@ -1,0 +1,86 @@
+---
+title: Solana Support Overview
+description: Index Solana blockchain data using Subsquid Pipes SDK
+---
+
+The Subsquid Pipes SDK provides comprehensive support for indexing Solana blockchain data through the Portal network. The Solana integration allows you to efficiently query and decode instructions, transactions, logs, token balances, and other on-chain data.
+
+## Key Features
+
+- **High-Performance Data Access**: Stream Solana blockchain data through the Subsquid Portal network
+- **Instruction Decoding**: Automatically decode program instructions using ABIs
+- **Type-Safe Queries**: Build queries with full TypeScript type safety
+- **Flexible Data Selection**: Request only the fields you need
+- **Composable Pipelines**: Combine multiple decoders and transformers
+
+## Core Components
+
+The Solana support consists of three main components:
+
+<CardGroup cols={3}>
+  <Card title="Portal Source" icon="database" href="./portal-source">
+    Connect to Solana Portal and stream blockchain data
+  </Card>
+  <Card title="Instruction Decoder" icon="code" href="./instruction-decoder">
+    Decode program instructions using ABIs
+  </Card>
+  <Card title="Query Builder" icon="wrench" href="./query-builder">
+    Build type-safe queries for Solana data
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+Here's a simple example that indexes swap instructions from the Orca Whirlpool DEX:
+
+```typescript
+import { solanaPortalSource, solanaInstructionDecoder } from '@subsquid/pipes/solana'
+import * as orcaWhirlpool from './abi/orca_whirlpool'
+
+const stream = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+}).pipe(
+  solanaInstructionDecoder({
+    range: { from: 340_000_000 },
+    programId: orcaWhirlpool.programId,
+    instructions: {
+      swap: orcaWhirlpool.instructions.swap,
+      swapV2: orcaWhirlpool.instructions.swapV2,
+    },
+  })
+)
+
+for await (const { data } of stream) {
+  console.log(`Decoded ${data.swap.length} swap instructions`)
+  console.log(`Decoded ${data.swapV2.length} swapV2 instructions`)
+}
+```
+
+## Available Data Types
+
+The Solana Portal provides access to:
+
+- **Blocks**: Block headers and metadata
+- **Transactions**: Transaction data including signatures and status
+- **Instructions**: Program instructions and inner instructions
+- **Logs**: Program logs emitted during execution
+- **Token Balances**: Pre and post transaction token balances
+- **Rewards**: Staking and voting rewards
+- **Balances**: Account balance changes
+
+## Portal Networks
+
+Subsquid provides Portal endpoints for Solana networks:
+
+- **Mainnet**: `https://portal.sqd.dev/datasets/solana-mainnet`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Portal Source" icon="arrow-right" href="./portal-source">
+    Learn how to connect to Solana Portal
+  </Card>
+  <Card title="Instruction Decoder" icon="arrow-right" href="./instruction-decoder">
+    Decode program instructions
+  </Card>
+</CardGroup>

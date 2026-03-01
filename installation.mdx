@@ -1,0 +1,178 @@
+---
+title: Installation
+description: Install the Subsquid Pipes SDK in your TypeScript or Node.js project
+---
+
+# Installation
+
+The Subsquid Pipes SDK is distributed as an npm package and can be installed in any TypeScript or Node.js project.
+
+## Requirements
+
+<Note>
+Subsquid Pipes requires **Node.js 22.15.0 or higher**.
+</Note>
+
+Before installing, ensure you have:
+
+- Node.js 22.15.0 or higher
+- A package manager (npm, yarn, or pnpm)
+- TypeScript 5.9.2 or higher (recommended)
+
+## Install the Package
+
+Add the `@subsquid/pipes` package to your project using your preferred package manager:
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @subsquid/pipes
+```
+
+```bash npm
+npm install @subsquid/pipes
+```
+
+```bash yarn
+yarn add @subsquid/pipes
+```
+
+</CodeGroup>
+
+## Optional Dependencies
+
+Depending on your use case, you may need to install additional peer dependencies:
+
+### ClickHouse Target
+
+For persisting data to ClickHouse:
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @clickhouse/client@1.14.0
+```
+
+```bash npm
+npm install @clickhouse/client@1.14.0
+```
+
+```bash yarn
+yarn add @clickhouse/client@1.14.0
+```
+
+</CodeGroup>
+
+### PostgreSQL with Drizzle
+
+For using PostgreSQL with Drizzle ORM:
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add drizzle-orm@0.44.7 pg@8.16.3 @types/pg
+```
+
+```bash npm
+npm install drizzle-orm@0.44.7 pg@8.16.3 @types/pg
+```
+
+```bash yarn
+yarn add drizzle-orm@0.44.7 pg@8.16.3 @types/pg
+```
+
+</CodeGroup>
+
+### SQLite with Better-SQLite3
+
+For local SQLite databases:
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add better-sqlite3@12.4.5 @types/better-sqlite3
+```
+
+```bash npm
+npm install better-sqlite3@12.4.5 @types/better-sqlite3
+```
+
+```bash yarn
+yarn add better-sqlite3@12.4.5 @types/better-sqlite3
+```
+
+</CodeGroup>
+
+## Development Tools
+
+For running TypeScript files directly during development, we recommend using `tsx`:
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add -D tsx
+```
+
+```bash npm
+npm install --save-dev tsx
+```
+
+```bash yarn
+yarn add -D tsx
+```
+
+</CodeGroup>
+
+Alternatively, you can run tsx without installing it:
+
+```bash
+pnpm dlx tsx your-script.ts
+```
+
+## Verify Installation
+
+Create a simple test file to verify the installation:
+
+```typescript test.ts
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+console.log('Subsquid Pipes SDK installed successfully!')
+console.log('Version:', require('@subsquid/pipes/package.json').version)
+```
+
+Run it with:
+
+```bash
+pnpm dlx tsx test.ts
+```
+
+You should see a success message with the SDK version (currently `0.1.0-beta.16`).
+
+## TypeScript Configuration
+
+Ensure your `tsconfig.json` includes these recommended settings:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Tutorial" icon="rocket" href="/quickstart">
+    Build your first blockchain data pipeline
+  </Card>
+  <Card title="EVM Guide" icon="ethereum" href="/evm/overview">
+    Explore EVM chain indexing
+  </Card>
+</CardGroup>

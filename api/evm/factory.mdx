@@ -1,0 +1,452 @@
+---
+title: Factory
+description: Track contract creation events and decode events from dynamically created contracts
+---
+
+## Overview
+
+The `Factory` class tracks contract creation events from factory contracts and enables decoding events from dynamically created contracts. This is essential when working with protocols like Uniswap where contracts (pools, pairs, etc.) are created dynamically by factory contracts.
+
+The factory pattern:
+1. Monitors factory contract(s) for creation events
+2. Extracts child contract addresses from those events
+3. Stores addresses in a database for efficient lookup
+4. Enables event decoding from all tracked child contracts
+
+## Creating a Factory
+
+### factory() Function
+
+```typescript
+function factory<T extends EventArgs>(options: FactoryOptions<T>): Factory<T>
+```
+
+Creates a new `Factory` instance that can be used as the `contracts` parameter in `evmDecoder()`.
+
+## Parameters
+
+<ParamField path="address" type="string | string[]" required>
+  Factory contract address(es) to monitor for creation events.
+  
+  Can be:
+  - A single address: `'0x1f98431c8ad98523631ae4a59f267346ea31f984'`
+  - Multiple addresses: `['0x...', '0x...']`
+</ParamField>
+
+<ParamField path="event" type="AbiEvent<T> | EventWithArgsInput<AbiEvent<T>>" required>
+  The factory event that signals contract creation. Can be:
+  
+  **Simple event (all creation events):**
+  ```typescript
+  event: factoryAbi.events.PoolCreated
+  ```
+  
+  **Event with indexed parameter filtering:**
+  ```typescript
+  event: {
+    event: factoryAbi.events.PoolCreated,
+    params: {
+      token0: '0x...', // Filter by token0
+      token1: ['0x...', '0x...'] // Multiple token1 values
+    }
+  }
+  ```
+</ParamField>
+
+<ParamField path="parameter" type="keyof T | ((data: DecodedAbiEvent<T>) => string | null)" required>
+  Specifies how to extract the child contract address from the decoded factory event.
+  
+  Can be:
+  
+  **Field name (string):**
+  ```typescript
+  parameter: 'pool' // Extract from event.pool
+  ```
+  
+  **Function:**
+  ```typescript
+  parameter: (event) => {
+    // Custom logic to extract address
+    return event.pool
+  }
+  ```
+  
+  Return `null` from the function to skip storing this particular event.
+</ParamField>
+
+<ParamField path="database" type="FactoryPersistentAdapter<InternalFactoryEvent<T>> | Promise<FactoryPersistentAdapter<InternalFactoryEvent<T>>>" required>
+  Database adapter for storing and querying factory events. Can be:
+  - A `FactoryPersistentAdapter` instance
+  - A Promise that resolves to a `FactoryPersistentAdapter`
+  
+  Use `factorySqliteDatabase()` for a SQLite implementation:
+  ```typescript
+  database: factorySqliteDatabase({
+    path: './uniswap-pools.sqlite'
+  })
+  ```
+</ParamField>
+
+<ParamField path="_experimental_preindex" type="{ from: number | string; to: number | string }">
+  Optional block range for pre-indexing factory events. When provided, factory events in this range are indexed before processing child events.
+  
+  This improves performance for large ranges by enabling server-side filtering for pre-indexed blocks:
+  
+  ```typescript
+  _experimental_preindex: {
+    from: 0,
+    to: 15000000 // Pre-index up to this block
+  }
+  ```
+  
+  **How it works:**
+  - Blocks 0 to 15000000: Uses server-side filtering with known addresses
+  - Blocks 15000001+: Uses client-side filtering for new contracts
+  
+  **Note:** This feature is experimental and may change in future versions.
+</ParamField>
+
+## Factory Class API
+
+### Methods
+
+#### migrate()
+
+```typescript
+async migrate(): Promise<void>
+```
+
+Initializes the database. Must be called before any database operations. This method is automatically called by `evmDecoder()` when the factory is used.
+
+#### getContract()
+
+```typescript
+async getContract(address: string): Promise<FactoryEvent<DecodedAbiEvent<T>> | null>
+```
+
+Looks up a contract by address and returns the factory event that created it.
+
+Returns `null` if:
+- The address is not tracked by this factory
+- The address doesn't match the factory's address filter
+- The address doesn't match the factory's indexed parameter filters
+
+#### getAllContracts()
+
+```typescript
+async getAllContracts(): Promise<InternalFactoryEvent<T>[]>
+```
+
+Returns all tracked factory events, optionally filtered by the factory's indexed parameters.
+
+#### factoryAddress()
+
+```typescript
+factoryAddress(): string[]
+```
+
+Returns the list of factory addresses being monitored.
+
+#### factoryTopic()
+
+```typescript
+factoryTopic(): string
+```
+
+Returns the topic hash of the factory event.
+
+#### factoryEvent()
+
+```typescript
+factoryEvent(): AbiEvent<T>
+```
+
+Returns the factory event ABI.
+
+#### factoryEventParams()
+
+```typescript
+factoryEventParams(): IndexedParams<AbiEvent<T>>
+```
+
+Returns the normalized indexed parameters used for filtering factory events.
+
+### Static Methods
+
+#### isFactory()
+
+```typescript
+static isFactory(address: any): boolean
+```
+
+Type guard to check if a value is a `Factory` instance.
+
+## Type Definitions
+
+```typescript
+type EventArgs = {
+  [key: string]: Codec<any> & { indexed?: boolean }
+}
+
+type InternalFactoryEvent<T extends EventArgs> = {
+  childAddress: string
+  factoryAddress: string
+  blockNumber: number
+  transactionIndex: number
+  logIndex: number
+  event: DecodedAbiEvent<T>
+}
+
+type DecodedAbiEvent<T extends EventArgs> = ReturnType<AbiEvent<T>['decode']>
+
+type FactoryEvent<T> = {
+  contract: string
+  blockNumber: number
+  event: T
+}
+
+interface FactoryPersistentAdapter<T extends InternalFactoryEvent<any>> {
+  all(): Promise<T[]>
+  all(params: IndexedParams<AbiEvent<any>>): Promise<T[]>
+  lookup(parameter: string): Promise<T | null>
+  save(entities: T[]): Promise<void>
+  remove(blockNumber: number): Promise<void>
+  migrate(): Promise<void>
+}
+```
+
+## Examples
+
+### Basic Factory
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { uniswapV3FactoryAbi } from './abi'
+
+const poolFactory = factory({
+  address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+  event: uniswapV3FactoryAbi.events.PoolCreated,
+  parameter: 'pool',
+  database: factorySqliteDatabase({
+    path: './uniswap3-pools.sqlite',
+  }),
+})
+```
+
+### Filter Factory Events
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { uniswapV3FactoryAbi } from './abi'
+
+// Only track pools with WETH as token0
+const wethPoolFactory = factory({
+  address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+  event: {
+    event: uniswapV3FactoryAbi.events.PoolCreated,
+    params: {
+      token0: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', // WETH
+    },
+  },
+  parameter: 'pool',
+  database: factorySqliteDatabase({
+    path: './weth-pools.sqlite',
+  }),
+})
+```
+
+### Multiple Factory Addresses
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { uniswapV2FactoryAbi } from './abi'
+
+const pairFactory = factory({
+  // Track multiple Uniswap V2 forks
+  address: [
+    '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', // Uniswap V2
+    '0xc35dadb65012ec5796536bd9864ed8773abc74c4', // SushiSwap
+  ],
+  event: uniswapV2FactoryAbi.events.PairCreated,
+  parameter: 'pair',
+  database: factorySqliteDatabase({
+    path: './dex-pairs.sqlite',
+  }),
+})
+```
+
+### Custom Parameter Extraction
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { customFactoryAbi } from './abi'
+
+const customFactory = factory({
+  address: '0x...',
+  event: customFactoryAbi.events.ContractCreated,
+  // Use a function to extract or transform the address
+  parameter: (event) => {
+    // Skip contracts that don't meet certain criteria
+    if (event.contractType !== 'Pool') {
+      return null
+    }
+    
+    // Return the address
+    return event.contractAddress
+  },
+  database: factorySqliteDatabase({
+    path: './custom-contracts.sqlite',
+  }),
+})
+```
+
+### With Pre-indexing
+
+```typescript
+import { factory, factorySqliteDatabase } from '@subsquid/pipes'
+import { uniswapV3FactoryAbi } from './abi'
+
+const poolFactory = factory({
+  address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+  event: uniswapV3FactoryAbi.events.PoolCreated,
+  parameter: 'pool',
+  database: factorySqliteDatabase({
+    path: './uniswap3-pools.sqlite',
+  }),
+  // Pre-index factory events up to block 15000000
+  // This improves performance for historical data
+  _experimental_preindex: {
+    from: 0,
+    to: 15000000,
+  },
+})
+```
+
+### Using Factory with evmDecoder
+
+```typescript
+import {
+  evmPortalSource,
+  evmDecoder,
+  factory,
+  factorySqliteDatabase,
+  createTarget,
+} from '@subsquid/pipes'
+import { uniswapV3FactoryAbi, uniswapV3PoolAbi } from './abi'
+
+// Create factory
+const poolFactory = factory({
+  address: '0x1f98431c8ad98523631ae4a59f267346ea31f984',
+  event: uniswapV3FactoryAbi.events.PoolCreated,
+  parameter: 'pool',
+  database: factorySqliteDatabase({
+    path: './uniswap3-pools.sqlite',
+  }),
+})
+
+// Use factory in decoder
+await evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  logger: 'info',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 0 },
+      // Pass factory as contracts parameter
+      contracts: poolFactory,
+      events: {
+        swaps: uniswapV3PoolAbi.events.Swap,
+        mints: uniswapV3PoolAbi.events.Mint,
+        burns: uniswapV3PoolAbi.events.Burn,
+      },
+    })
+  )
+  .pipeTo(
+    createTarget({
+      write: async ({ read }) => {
+        for await (const { data } of read()) {
+          for (const swap of data.swaps) {
+            console.log('Swap in pool:', swap.contract)
+            console.log('Created by factory:', swap.factory?.contract)
+            console.log('At block:', swap.factory?.blockNumber)
+            console.log('Factory event:', swap.factory?.event)
+          }
+        }
+      },
+    })
+  )
+```
+
+## Database Adapter
+
+The factory requires a database adapter to store and query factory events. The adapter must implement the `FactoryPersistentAdapter` interface:
+
+```typescript
+interface FactoryPersistentAdapter<T extends InternalFactoryEvent<any>> {
+  // Get all factory events, optionally filtered by indexed parameters
+  all(params?: IndexedParams<AbiEvent<any>>): Promise<T[]>
+  
+  // Look up a contract by address
+  lookup(parameter: string): Promise<T | null>
+  
+  // Save factory events
+  save(entities: T[]): Promise<void>
+  
+  // Remove events from or after a specific block (used for forking)
+  remove(blockNumber: number): Promise<void>
+  
+  // Initialize database schema
+  migrate(): Promise<void>
+}
+```
+
+### SQLite Adapter
+
+Use `factorySqliteDatabase()` for a built-in SQLite implementation:
+
+```typescript
+import { factorySqliteDatabase } from '@subsquid/pipes'
+
+const database = factorySqliteDatabase({
+  path: './factory-events.sqlite',
+})
+```
+
+## How Factory Works
+
+### 1. Initialization
+
+When the factory is used in `evmDecoder()`, it:
+- Calls `migrate()` to initialize the database
+- Builds queries for factory events
+- Optionally runs pre-indexing if configured
+
+### 2. Factory Event Processing
+
+During data processing:
+- Factory events are decoded from portal data
+- Child addresses are extracted using the `parameter` option
+- Events are stored in the database
+- Events are also kept in memory for the current batch
+
+### 3. Child Event Filtering
+
+For each child event:
+- The factory looks up the contract address (memory first, then database)
+- Checks if the address was created by a monitored factory
+- Checks if the factory event matches indexed parameter filters
+- If matched, includes factory info in the decoded event
+- If not matched, skips the event
+
+### 4. Pre-indexing (Optional)
+
+With `_experimental_preindex`:
+- Factory events are indexed in the specified range before child event processing
+- Enables server-side filtering for pre-indexed blocks (more efficient)
+- Falls back to client-side filtering for blocks after the pre-index range
+
+## Related
+
+- [evmDecoder()](/api/evm/decoder) - Use factory with event decoder
+- [evmPortalSource()](/api/evm/portal-source) - Create a portal source for EVM data
+- [EvmQueryBuilder](/api/evm/query-builder) - Build advanced EVM queries

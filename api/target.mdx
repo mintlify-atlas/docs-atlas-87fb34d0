@@ -1,0 +1,344 @@
+---
+title: 'Target'
+description: 'Define data destinations for Pipeline output'
+---
+
+## Overview
+
+A Target is a destination for processed Portal data. It receives batches through an async iterator and handles writing, as well as optional fork recovery.
+
+## createTarget()
+
+Factory function to create a Target instance.
+
+```typescript
+function createTarget<In>(options: Target<In>): Target<In>
+```
+
+<ParamField path="options" type="Target<In>" required>
+  Target configuration
+
+  <ParamField path="write" type="(writer: Writer) => Promise<void>" required>
+    Main write function that processes batches from the source.
+    
+    Receives a writer object with:
+    - `read`: Async iterator function that yields Portal batches
+    - `logger`: Logger instance for logging operations
+    
+    ```typescript
+    write: async ({ read, logger }) => {
+      for await (const batch of read()) {
+        // Process batch.data
+        await database.save(batch.data)
+        
+        logger.info(`Processed block ${batch.ctx.state.current.number}`)
+      }
+    }
+    ```
+  </ParamField>
+
+  <ParamField path="fork" type="(previousBlocks: BlockCursor[]) => Promise<BlockCursor | null>">
+    Optional fork handler called when a blockchain reorganization is detected.
+    
+    Should:
+    1. Rollback state to a valid cursor from `previousBlocks`
+    2. Return the cursor to resume from
+    3. Return `null` if unable to recover
+    
+    ```typescript
+    fork: async (previousBlocks) => {
+      // Find a block we can rollback to
+      for (const cursor of previousBlocks) {
+        const exists = await database.hasBlock(cursor.number)
+        if (exists) {
+          await database.rollbackTo(cursor.number)
+          return cursor
+        }
+      }
+      return null
+    }
+    ```
+  </ParamField>
+</ParamField>
+
+<ResponseField name="return" type="Target<In>">
+  A Target instance ready to be used with `source.pipeTo()`
+</ResponseField>
+
+## Target Interface
+
+```typescript
+type Target<In> = {
+  write: (writer: Writer<In>) => Promise<void>
+  fork?: (previousBlocks: BlockCursor[]) => Promise<BlockCursor | null>
+}
+```
+
+### Writer
+
+The writer object passed to the `write` function.
+
+```typescript
+type Writer<In> = {
+  read: (cursor?: BlockCursor) => AsyncIterableIterator<PortalBatch<In>>
+  logger: Logger
+}
+```
+
+<ResponseField name="read" type="(cursor?: BlockCursor) => AsyncIterableIterator<PortalBatch<In>>">
+  Function that returns an async iterator of Portal batches. Optionally accepts a cursor to resume from a specific block.
+</ResponseField>
+
+<ResponseField name="logger" type="Logger">
+  Pino logger instance for logging
+</ResponseField>
+
+## Examples
+
+### Basic Target
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+
+const consoleTarget = createTarget({
+  async write({ read, logger }) {
+    logger.info('Starting to process batches')
+    
+    for await (const batch of read()) {
+      console.log('Batch received:')
+      console.log('  Blocks:', batch.data.blocks.length)
+      console.log('  Current block:', batch.ctx.state.current.number)
+      console.log('  Progress:', batch.ctx.state.progress?.percentage + '%')
+    }
+    
+    logger.info('Finished processing')
+  },
+})
+
+await source.pipeTo(consoleTarget)
+```
+
+### Database Target with Fork Handling
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+import { Database } from './database'
+
+const db = new Database()
+
+const databaseTarget = createTarget({
+  async write({ read, logger }) {
+    await db.connect()
+    logger.info('Database connected')
+    
+    try {
+      // Get last processed block to resume from
+      const lastBlock = await db.getLastBlock()
+      
+      for await (const batch of read(lastBlock)) {
+        // Start transaction
+        await db.beginTransaction()
+        
+        try {
+          // Save blocks
+          await db.saveBlocks(batch.data.blocks)
+          
+          // Update cursor
+          await db.saveCursor(batch.ctx.state.current)
+          
+          // Commit transaction
+          await db.commit()
+          
+          logger.info(
+            `Saved block ${batch.ctx.state.current.number} ` +
+            `(${batch.data.blocks.length} blocks in batch)`
+          )
+        } catch (error) {
+          await db.rollback()
+          throw error
+        }
+      }
+    } finally {
+      await db.disconnect()
+      logger.info('Database disconnected')
+    }
+  },
+  
+  async fork(previousBlocks) {
+    logger.warn('Fork detected, attempting rollback')
+    
+    // Try to find a valid rollback point
+    for (const cursor of previousBlocks) {
+      const block = await db.getBlock(cursor.number)
+      
+      if (block && block.hash === cursor.hash) {
+        // Found a matching block, rollback to it
+        await db.deleteBlocksAfter(cursor.number)
+        logger.info(`Rolled back to block ${cursor.number}`)
+        return cursor
+      }
+    }
+    
+    // No valid rollback point found
+    logger.error('Unable to find valid rollback point')
+    return null
+  },
+})
+
+await source.pipeTo(databaseTarget)
+```
+
+### File System Target
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+import { writeFile, mkdir } from 'fs/promises'
+import { join } from 'path'
+
+const outputDir = './output'
+
+const fileTarget = createTarget({
+  async write({ read, logger }) {
+    // Ensure output directory exists
+    await mkdir(outputDir, { recursive: true })
+    
+    for await (const batch of read()) {
+      const blockNumber = batch.ctx.state.current.number
+      const filename = join(outputDir, `block-${blockNumber}.json`)
+      
+      await writeFile(
+        filename,
+        JSON.stringify(batch.data, null, 2)
+      )
+      
+      logger.info(`Saved block ${blockNumber} to ${filename}`)
+    }
+  },
+})
+
+await source.pipeTo(fileTarget)
+```
+
+### HTTP API Target
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+
+const apiTarget = createTarget({
+  async write({ read, logger }) {
+    for await (const batch of read()) {
+      try {
+        const response = await fetch('https://api.example.com/blocks', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(batch.data),
+        })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        
+        logger.info(
+          `Sent batch to API (block ${batch.ctx.state.current.number})`
+        )
+      } catch (error) {
+        logger.error({ error }, 'Failed to send batch to API')
+        throw error
+      }
+    }
+  },
+})
+
+await source.pipeTo(apiTarget)
+```
+
+### Batch Aggregation Target
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+
+const aggregationTarget = createTarget({
+  async write({ read, logger }) {
+    let totalBlocks = 0
+    let totalTransactions = 0
+    let batchCount = 0
+    
+    const startTime = Date.now()
+    
+    for await (const batch of read()) {
+      totalBlocks += batch.data.blocks.length
+      totalTransactions += batch.data.blocks.reduce(
+        (sum, block) => sum + (block.transactions?.length || 0),
+        0
+      )
+      batchCount++
+      
+      // Log progress every 100 batches
+      if (batchCount % 100 === 0) {
+        const elapsed = (Date.now() - startTime) / 1000
+        const blocksPerSec = totalBlocks / elapsed
+        
+        logger.info(
+          `Progress: ${totalBlocks} blocks, ` +
+          `${totalTransactions} transactions, ` +
+          `${blocksPerSec.toFixed(2)} blocks/sec`
+        )
+      }
+    }
+    
+    const elapsed = (Date.now() - startTime) / 1000
+    
+    logger.info('Summary:')
+    logger.info(`  Total blocks: ${totalBlocks}`)
+    logger.info(`  Total transactions: ${totalTransactions}`)
+    logger.info(`  Time elapsed: ${elapsed.toFixed(2)}s`)
+    logger.info(`  Average speed: ${(totalBlocks / elapsed).toFixed(2)} blocks/sec`)
+  },
+})
+
+await source.pipeTo(aggregationTarget)
+```
+
+### Multi-Target Pattern
+
+```typescript
+import { createTarget } from '@subsquid/pipes'
+
+// Helper to broadcast to multiple targets
+function broadcastTarget<In>(...targets: Target<In>[]): Target<In> {
+  return createTarget({
+    async write({ read, logger }) {
+      // Collect all batches into memory (use with caution!)
+      const batches: PortalBatch<In>[] = []
+      for await (const batch of read()) {
+        batches.push(batch)
+      }
+      
+      // Write to all targets in parallel
+      await Promise.all(
+        targets.map(target =>
+          target.write({
+            async *read() {
+              for (const batch of batches) {
+                yield batch
+              }
+            },
+            logger,
+          })
+        )
+      )
+    },
+  })
+}
+
+// Use it
+const multiTarget = broadcastTarget(
+  databaseTarget,
+  fileTarget,
+  apiTarget
+)
+
+await source.pipeTo(multiTarget)
+```

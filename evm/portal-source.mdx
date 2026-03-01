@@ -1,0 +1,222 @@
+---
+title: EVM Portal Source
+description: Stream blockchain data from Subsquid Portal API
+---
+
+## Overview
+
+The `evmPortalSource` function creates a data stream from the Subsquid Portal API for EVM-compatible blockchains. It provides a high-performance, type-safe way to access blockchain data with built-in caching, progress tracking, and metrics support.
+
+## Basic Usage
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+```
+
+## Configuration
+
+### Type Signature
+
+```typescript evm-portal-source.ts:23-37
+function evmPortalSource<F extends evm.FieldSelection = any>({
+  portal,
+  query,
+  cache,
+  logger,
+  metrics,
+  progress,
+}: {
+  portal: string | PortalClientOptions | PortalClient
+  query?: PortalRange | EvmQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+})
+```
+
+### Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions | PortalClient" required>
+  Portal API endpoint URL or configured client. Common endpoints:
+  - `https://portal.sqd.dev/datasets/ethereum-mainnet`
+  - `https://portal.sqd.dev/datasets/base-mainnet`
+  - `https://portal.sqd.dev/datasets/arbitrum-one`
+</ParamField>
+
+<ParamField path="query" type="PortalRange | EvmQueryBuilder">
+  Block range or query builder for filtering data. See [Query Builder](/evm/query-builder) for advanced usage.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Optional cache configuration for storing and reusing Portal responses.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level (`'debug'`, `'info'`, `'warn'`, `'error'`).
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Optional metrics server for monitoring pipeline performance.
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Progress tracking configuration with callbacks for monitoring indexing progress.
+</ParamField>
+
+## Examples
+
+### Basic Stream
+
+Create a simple stream from Ethereum mainnet:
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+
+for await (const { data } of stream) {
+  console.log(`Received ${data.blocks.length} blocks`)
+}
+```
+
+### With Debug Logging
+
+Enable debug logging to see detailed pipeline information:
+
+```typescript
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  logger: 'debug',
+})
+```
+
+### Multiple Networks
+
+Process data from different networks:
+
+```typescript
+const ethereumStream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+
+const baseStream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+})
+```
+
+### With Progress Tracking
+
+Track indexing progress with custom callbacks:
+
+```typescript
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  progress: {
+    interval: 10000, // Report every 10 seconds
+    onProgress: (stats) => {
+      console.log(`Processed ${stats.blocksProcessed} blocks`)
+    },
+  },
+})
+```
+
+## Piping to Decoders
+
+The portal source is typically piped to an event decoder for processing:
+
+```typescript 01.basic-piping.example.ts:12-22
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  // logger: 'debug',
+}).pipe(
+  evmDecoder({
+    range: { from: 'latest' },
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }),
+)
+```
+
+## Combining Multiple Pipes
+
+Use `pipeComposite` to process multiple data streams simultaneously:
+
+```typescript 02.combining-pipes.example.ts:16-29
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+}).pipeComposite({
+  transfers: erc20Transfers({
+    range: { from: '20,000,000', to: '+1,000' },
+  }),
+  uniswapV3: uniswapV3Decoder({
+    range,
+    factory: {
+      address: uniswapV3.base.mainnet.factory,
+      database: factorySqliteDatabase({ path: './uniswap-v3-pools.sqlite' }),
+    },
+  }),
+})
+```
+
+## Return Type
+
+The source returns a `PortalSource` instance that implements the async iterable protocol:
+
+```typescript evm-portal-source.ts:19-19
+type EvmTransformer<In, Out> = Transformer<In, Out, EvmQueryBuilder>
+```
+
+```typescript evm-portal-source.ts:21-21
+type EvmPortalData<F extends evm.FieldSelection> = { blocks: evm.Block<F>[] }
+```
+
+Each iteration yields batches of blocks with the requested fields.
+
+## Performance Considerations
+
+### Caching
+
+Use caching to avoid re-fetching data during development:
+
+```typescript
+import { createPortalCache } from '@subsquid/pipes'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  cache: createPortalCache({ path: './.cache' }),
+})
+```
+
+### Batch Size
+
+The Portal API automatically optimizes batch sizes based on your query. For custom control, configure the portal client directly:
+
+```typescript
+import { PortalClient } from '@subsquid/pipes'
+
+const client = new PortalClient({
+  url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  batchSize: 100, // blocks per request
+})
+
+const stream = evmPortalSource({ portal: client })
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Event Decoder" icon="arrow-right" href="/evm/decoder">
+    Learn how to decode EVM events
+  </Card>
+  <Card title="Query Builder" icon="arrow-right" href="/evm/query-builder">
+    Build advanced queries
+  </Card>
+</CardGroup>

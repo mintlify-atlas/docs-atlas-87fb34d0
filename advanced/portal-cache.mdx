@@ -1,0 +1,252 @@
+---
+title: Portal Caching
+description: Improve performance with portal caching for finalized blocks
+---
+
+Portal caching enables you to cache finalized blockchain data locally, reducing network requests and improving indexer performance during restarts and development.
+
+## Overview
+
+The `PortalCache` interface allows you to store and retrieve finalized blocks from Portal. When enabled, the SDK:
+
+1. Checks the local cache for requested blocks
+2. Loads cached data if available
+3. Fetches new data from Portal for blocks not in cache
+4. Automatically caches finalized blocks for future use
+
+## PortalCache Interface
+
+The cache interface is minimal and flexible:
+
+```typescript
+export interface PortalCache {
+  getStream<Q extends Query>(options: {
+    portal: PortalClient;
+    query: Q;
+    logger: Logger;
+  }): PortalStream<GetBlock<Q>>;
+}
+```
+
+## SQLite Cache Implementation
+
+The SDK provides a built-in SQLite cache adapter for Node.js environments.
+
+### Installation
+
+```bash
+npm install better-sqlite3
+# or
+pnpm add better-sqlite3
+```
+
+### Basic Usage
+
+```typescript
+import { PortalSource } from '@subsquid/pipes';
+import { portalSqliteCache } from '@subsquid/pipes/portal-cache';
+
+const source = new PortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: /* your query */,
+  logger,
+  cache: portalSqliteCache({
+    path: '.cache/portal.db'
+  })
+});
+```
+
+### Configuration Options
+
+<ParamField path="path" type="string" required>
+  Path to the SQLite database file. Parent directories will be created automatically.
+</ParamField>
+
+<ParamField path="compress" type="boolean" default="true">
+  Enable data compression using zstd (or gzip as fallback). Significantly reduces disk usage.
+</ParamField>
+
+<ParamField path="readonly" type="boolean" default="false">
+  Open database in read-only mode.
+</ParamField>
+
+<ParamField path="verbose" type="boolean" default="false">
+  Enable SQLite verbose logging.
+</ParamField>
+
+## How Caching Works
+
+### Cache Key Generation
+
+Each query is hashed to create a unique cache key. The cache stores data by:
+- **Query hash**: Ensures different queries don't conflict
+- **Block range**: Stores finalized blocks in sequential ranges
+
+```typescript
+// Cache storage structure
+CREATE TABLE data (
+  query_hash TEXT,
+  block_from INTEGER,
+  block_to   INTEGER,
+  value      BLOB,
+  PRIMARY KEY ("block_from", "block_to", "query_hash")
+)
+```
+
+### Finalized Blocks Only
+
+The cache only stores **finalized blocks** to prevent storing data from chain reorganizations:
+
+```typescript
+const finalizedHead = batch.head.finalized?.number;
+const finalizedBlocks = batch.blocks.filter(
+  (b) => b.header.number <= finalizedHead
+);
+```
+
+### Automatic Fallback
+
+When cache data runs out, the SDK seamlessly switches to fetching from Portal:
+
+```typescript
+// Load from cache first
+for await (const message of cache.stream({ fromBlock, queryHash })) {
+  yield decodedBatch;
+}
+
+// Then switch to Portal for remaining blocks
+for await (const batch of portal.getStream({ fromBlock: cursor.number })) {
+  yield batch;
+}
+```
+
+## Benefits
+
+<CardGroup cols={2}>
+  <Card title="Faster Restarts" icon="rotate">
+    Skip re-downloading finalized blocks when restarting your indexer during development.
+  </Card>
+  <Card title="Reduced Bandwidth" icon="download">
+    Minimize network usage by caching frequently accessed historical data.
+  </Card>
+  <Card title="Offline Development" icon="wifi-slash">
+    Work with cached data without constant network connectivity.
+  </Card>
+  <Card title="Lower Costs" icon="coins">
+    Reduce Portal API usage and associated costs for historical data.
+  </Card>
+</CardGroup>
+
+## Advanced Example
+
+```typescript
+import { PortalSource } from '@subsquid/pipes';
+import { portalSqliteCache } from '@subsquid/pipes/portal-cache';
+import { createLogger } from '@subsquid/logger';
+
+const logger = createLogger('sqd:cache');
+
+const cache = portalSqliteCache({
+  path: '.cache/ethereum-mainnet.db',
+  compress: true,  // Use zstd compression
+});
+
+const source = new PortalSource({
+  portal: {
+    url: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+    http: {
+      logger,
+      retryAttempts: 5,
+    }
+  },
+  query: ethereum.query()
+    .block({ number: true, timestamp: true })
+    .transaction({ hash: true, to: true })
+    .from(18_000_000),
+  logger,
+  cache,
+});
+
+// First run: fetches from Portal and caches
+// Subsequent runs: loads from cache, then Portal for new blocks
+for await (const batch of source) {
+  console.log(`Processing block ${batch.ctx.state.current.number}`);
+}
+```
+
+## Custom Cache Implementation
+
+You can implement custom cache backends by implementing the `PortalCache` interface:
+
+```typescript
+import { PortalCache, PortalClient, Query, Logger } from '@subsquid/pipes';
+
+class RedisPortalCache implements PortalCache {
+  async *getStream<Q extends Query>({ portal, query, logger }) {
+    const queryHash = await hashQuery(query);
+    
+    // Try loading from Redis
+    const cached = await this.loadFromRedis(queryHash, query.fromBlock);
+    if (cached) {
+      yield cached;
+    }
+    
+    // Fetch remaining from Portal
+    for await (const batch of portal.getStream(query)) {
+      // Cache finalized blocks
+      await this.saveToRedis(batch, queryHash);
+      yield batch;
+    }
+  }
+  
+  private async loadFromRedis(queryHash: string, fromBlock: number) {
+    // Implementation
+  }
+  
+  private async saveToRedis(batch: any, queryHash: string) {
+    // Implementation
+  }
+}
+```
+
+## Performance Considerations
+
+<Warning>
+  Cache files can grow large for extensive block ranges. Monitor disk usage and consider:
+  - Using compression (enabled by default)
+  - Periodically clearing old cache entries
+  - Implementing cache expiration policies
+</Warning>
+
+<Tip>
+  The cache is query-specific. Changing your query (adding/removing fields) will generate a new cache key, requiring fresh data to be fetched.
+</Tip>
+
+## Troubleshooting
+
+### Cache Not Being Used
+
+Ensure the cache is passed to `PortalSource` constructor:
+
+```typescript
+const source = new PortalSource({
+  // ... other options
+  cache: portalSqliteCache({ path: '.cache/portal.db' })
+});
+```
+
+### Database Locked Errors
+
+SQLite supports only one writer at a time. Ensure you're not running multiple indexer instances with the same cache file.
+
+### Disk Space Issues
+
+Enable compression and monitor cache size:
+
+```bash
+# Check cache size
+du -sh .cache/portal.db
+
+# Clear cache if needed
+rm .cache/portal.db
+```

@@ -1,0 +1,555 @@
+---
+title: EvmQueryBuilder
+description: Build advanced EVM data queries with custom field selection and request filtering
+---
+
+## Overview
+
+The `EvmQueryBuilder` class provides a fluent API for building complex EVM data queries. It allows you to specify which blockchain data fields to fetch (blocks, transactions, logs, traces, state diffs) and define filtering criteria for each data type.
+
+## Constructor
+
+```typescript
+class EvmQueryBuilder<F extends evm.FieldSelection = {}>
+```
+
+Creates a new query builder instance. The type parameter `F` tracks which fields have been added to the query for type-safe data access.
+
+```typescript
+import { EvmQueryBuilder } from '@subsquid/pipes'
+
+const query = new EvmQueryBuilder()
+```
+
+## Methods
+
+### addFields()
+
+```typescript
+addFields<T extends Subset<T, evm.FieldSelection>>(fields: T): EvmQueryBuilder<F & T>
+```
+
+Specifies which data fields to include in the response. Fields are organized by data type (block, transaction, log, trace, stateDiff).
+
+<ParamField path="fields" type="evm.FieldSelection" required>
+  Field selection object specifying which fields to include in the response.
+  
+  Structure:
+  ```typescript
+  {
+    block?: { [field: string]: true },
+    transaction?: { [field: string]: true },
+    log?: { [field: string]: true },
+    trace?: { [field: string]: true },
+    stateDiff?: { [field: string]: true },
+  }
+  ```
+</ParamField>
+
+**Returns:** `EvmQueryBuilder<F & T>` - Query builder with updated field types
+
+#### Example
+
+```typescript
+const query = new EvmQueryBuilder().addFields({
+  block: {
+    number: true,
+    hash: true,
+    timestamp: true,
+    parentHash: true,
+  },
+  log: {
+    address: true,
+    topics: true,
+    data: true,
+    transactionHash: true,
+  },
+  transaction: {
+    hash: true,
+    from: true,
+    to: true,
+    value: true,
+  },
+})
+```
+
+### addLog()
+
+```typescript
+addLog(options: RequestOptions<evm.LogRequest>): this
+```
+
+Adds a log (event) request to the query with optional filtering.
+
+<ParamField path="options.range" type="PortalRange" required>
+  Block range for the request:
+  - `{ from: number, to?: number }` - Specific block range
+  - `{ from: 'latest' }` - Start from latest block
+</ParamField>
+
+<ParamField path="options.request" type="evm.LogRequest" required>
+  Log filtering criteria:
+  - `address?: string[]` - Filter by contract addresses
+  - `topic0?: string[]` - Filter by event signatures
+  - `topic1?: string[]` - Filter by first indexed parameter
+  - `topic2?: string[]` - Filter by second indexed parameter
+  - `topic3?: string[]` - Filter by third indexed parameter
+  - `transaction?: boolean` - Include transaction data
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+#### Example
+
+```typescript
+query.addLog({
+  range: { from: 0, to: 1000000 },
+  request: {
+    address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+    transaction: true,
+  },
+})
+```
+
+### addTransaction()
+
+```typescript
+addTransaction(options: RequestOptions<evm.TransactionRequest>): this
+```
+
+Adds a transaction request to the query with optional filtering.
+
+<ParamField path="options.range" type="PortalRange" required>
+  Block range for the request.
+</ParamField>
+
+<ParamField path="options.request" type="evm.TransactionRequest" required>
+  Transaction filtering criteria:
+  - `from?: string[]` - Filter by sender addresses
+  - `to?: string[]` - Filter by recipient addresses
+  - `sighash?: string[]` - Filter by function signatures
+  - `logs?: boolean` - Include logs emitted by the transaction
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+#### Example
+
+```typescript
+query.addTransaction({
+  range: { from: 0 },
+  request: {
+    to: ['0x1f98431c8ad98523631ae4a59f267346ea31f984'],
+    sighash: ['0x13ead562'], // createPool function
+    logs: true,
+  },
+})
+```
+
+### addTrace()
+
+```typescript
+addTrace(options: RequestOptions<evm.TraceRequest>): this
+```
+
+Adds a trace (internal transaction) request to the query.
+
+<ParamField path="options.range" type="PortalRange" required>
+  Block range for the request.
+</ParamField>
+
+<ParamField path="options.request" type="evm.TraceRequest" required>
+  Trace filtering criteria:
+  - `type?: string[]` - Filter by trace type (call, create, suicide, reward)
+  - `callFrom?: string[]` - Filter by call sender
+  - `callTo?: string[]` - Filter by call recipient
+  - `callSighash?: string[]` - Filter by call function signature
+  - `createFrom?: string[]` - Filter by contract creator
+  - `suicideRefundAddress?: string[]` - Filter by selfdestruct refund address
+  - `transaction?: boolean` - Include transaction data
+  - `transactionLogs?: boolean` - Include transaction logs
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+#### Example
+
+```typescript
+query.addTrace({
+  range: { from: 0 },
+  request: {
+    type: ['create'],
+    createFrom: ['0x1f98431c8ad98523631ae4a59f267346ea31f984'],
+    transaction: true,
+  },
+})
+```
+
+### addStateDiff()
+
+```typescript
+addStateDiff(options: RequestOptions<evm.StateDiffRequest>): this
+```
+
+Adds a state diff request to the query for tracking storage changes.
+
+<ParamField path="options.range" type="PortalRange" required>
+  Block range for the request.
+</ParamField>
+
+<ParamField path="options.request" type="evm.StateDiffRequest" required>
+  State diff filtering criteria:
+  - `address?: string[]` - Filter by contract addresses
+  - `key?: string[]` - Filter by storage keys
+  - `transaction?: boolean` - Include transaction data
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+#### Example
+
+```typescript
+query.addStateDiff({
+  range: { from: 0 },
+  request: {
+    address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    transaction: true,
+  },
+})
+```
+
+### addRange()
+
+```typescript
+addRange(range: PortalRange): this
+```
+
+Adds a simple block range without any specific data requests. Useful for fetching all blocks in a range.
+
+<ParamField path="range" type="PortalRange" required>
+  Block range:
+  - `{ from: number, to?: number }` - Specific block range
+  - `{ from: 'latest' }` - Start from latest block
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+#### Example
+
+```typescript
+query.addRange({ from: 0, to: 1000000 })
+```
+
+### getFields()
+
+```typescript
+getFields(): F
+```
+
+Returns the current field selection.
+
+**Returns:** `F` - Field selection object
+
+### getRequests()
+
+```typescript
+getRequests(): RangeRequest<evm.DataRequest, NaturalRange>[]
+```
+
+Returns all data requests added to the query.
+
+**Returns:** Array of range requests
+
+### getType()
+
+```typescript
+getType(): string
+```
+
+Returns the query type identifier.
+
+**Returns:** `'evm'`
+
+### merge()
+
+```typescript
+merge(query?: EvmQueryBuilder<F>): this
+```
+
+Merges another query builder into this one, combining fields and requests.
+
+<ParamField path="query" type="EvmQueryBuilder<F>">
+  Query builder to merge from.
+</ParamField>
+
+**Returns:** `this` - Query builder for chaining
+
+## Type Definitions
+
+```typescript
+type PortalRange = 
+  | { from: number; to?: number }
+  | { from: 'latest'; to?: number }
+
+type RequestOptions<R> = {
+  range: PortalRange
+  request: R
+}
+
+namespace evm {
+  type FieldSelection = {
+    block?: Partial<Record<keyof BlockHeaderFields, true>>
+    transaction?: Partial<Record<keyof TransactionFields, true>>
+    log?: Partial<Record<keyof LogFields, true>>
+    trace?: Partial<Record<keyof TraceFields, true>>
+    stateDiff?: Partial<Record<keyof StateDiffFields, true>>
+  }
+  
+  type LogRequest = {
+    address?: string[]
+    topic0?: string[]
+    topic1?: string[]
+    topic2?: string[]
+    topic3?: string[]
+    transaction?: boolean
+  }
+  
+  type TransactionRequest = {
+    from?: string[]
+    to?: string[]
+    sighash?: string[]
+    logs?: boolean
+  }
+  
+  type TraceRequest = {
+    type?: string[]
+    callFrom?: string[]
+    callTo?: string[]
+    callSighash?: string[]
+    createFrom?: string[]
+    suicideRefundAddress?: string[]
+    transaction?: boolean
+    transactionLogs?: boolean
+  }
+  
+  type StateDiffRequest = {
+    address?: string[]
+    key?: string[]
+    transaction?: boolean
+  }
+}
+```
+
+## Examples
+
+### Basic Query
+
+```typescript
+import { EvmQueryBuilder } from '@subsquid/pipes'
+
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, hash: true, timestamp: true },
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 0 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+```
+
+### Multiple Data Types
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    transaction: { hash: true, from: true, to: true, value: true },
+    log: { topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 0 },
+    request: {
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+      transaction: true,
+    },
+  })
+  .addTransaction({
+    range: { from: 0 },
+    request: {
+      to: ['0x1f98431c8ad98523631ae4a59f267346ea31f984'],
+      logs: true,
+    },
+  })
+```
+
+### With evmPortalSource
+
+```typescript
+import { evmPortalSource, EvmQueryBuilder } from '@subsquid/pipes'
+
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, hash: true, timestamp: true },
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 0, to: 1000000 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+    },
+  })
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query,
+  logger: 'info',
+})
+```
+
+### Multiple Ranges
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    log: { address: true, topics: true, data: true },
+  })
+  // First range: USDC transfers
+  .addLog({
+    range: { from: 0, to: 1000000 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+    },
+  })
+  // Second range: USDT transfers
+  .addLog({
+    range: { from: 1000001 },
+    request: {
+      address: ['0xdac17f958d2ee523a2206206994597c13d831ec7'],
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+    },
+  })
+```
+
+### Traces and State Diffs
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    trace: { type: true, callFrom: true, callTo: true, callValue: true },
+    stateDiff: { address: true, key: true, value: true },
+  })
+  .addTrace({
+    range: { from: 0 },
+    request: {
+      type: ['call'],
+      callTo: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      transaction: true,
+    },
+  })
+  .addStateDiff({
+    range: { from: 0 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+```
+
+### Merging Queries
+
+```typescript
+const baseQuery = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+  })
+
+const logsQuery = new EvmQueryBuilder()
+  .addFields({
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 0 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+
+// Merge queries
+const combined = new EvmQueryBuilder()
+  .merge(baseQuery)
+  .merge(logsQuery)
+```
+
+## Field Reference
+
+### Block Fields
+
+- `number`: Block number
+- `hash`: Block hash
+- `parentHash`: Parent block hash
+- `timestamp`: Block timestamp (Unix seconds)
+- `transactionsRoot`: Transactions merkle root
+- `receiptsRoot`: Receipts merkle root
+- `stateRoot`: State merkle root
+- `logsBloom`: Logs bloom filter
+- `sha3Uncles`: SHA3 of uncles
+- `extraData`: Extra data
+- `miner`: Miner address
+- `nonce`: Block nonce
+- `mixHash`: Mix hash
+- `size`: Block size in bytes
+- `gasLimit`: Gas limit
+- `gasUsed`: Gas used
+- `difficulty`: Difficulty
+- `totalDifficulty`: Total difficulty
+- `baseFeePerGas`: Base fee per gas (EIP-1559)
+- `blobGasUsed`: Blob gas used (EIP-4844)
+- `excessBlobGas`: Excess blob gas (EIP-4844)
+- `l1BlockNumber`: L1 block number (L2 chains)
+
+### Transaction Fields
+
+- `transactionIndex`: Index in block
+- `hash`: Transaction hash
+- `nonce`: Sender nonce
+- `from`: Sender address
+- `to`: Recipient address
+- `input`: Transaction input data
+- `value`: Value transferred
+- `gas`: Gas limit
+- `gasPrice`: Gas price
+- `maxFeePerGas`: Max fee per gas (EIP-1559)
+- `maxPriorityFeePerGas`: Max priority fee (EIP-1559)
+- `v`, `r`, `s`: Signature values
+- `yParity`: Y parity (EIP-2930)
+- `chainId`: Chain ID
+- `sighash`: Function signature (first 4 bytes of input)
+- `contractAddress`: Created contract address
+- `gasUsed`: Gas used
+- `cumulativeGasUsed`: Cumulative gas used
+- `effectiveGasPrice`: Effective gas price
+- `type`: Transaction type
+- `status`: Transaction status (0 = failure, 1 = success)
+- `blobVersionedHashes`: Blob hashes (EIP-4844)
+- L2-specific: `l1Fee`, `l1FeeScalar`, `l1GasPrice`, `l1GasUsed`, etc.
+
+### Log Fields
+
+- `logIndex`: Log index in block
+- `transactionIndex`: Transaction index
+- `transactionHash`: Transaction hash
+- `address`: Contract address
+- `topics`: Event topics (indexed parameters)
+- `data`: Event data (non-indexed parameters)
+
+## Related
+
+- [evmPortalSource()](/api/evm/portal-source) - Use query builder with portal source
+- [evmDecoder()](/api/evm/decoder) - Decode events from queried data
+- [Factory](/api/evm/factory) - Track dynamically created contracts

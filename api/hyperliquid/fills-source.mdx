@@ -1,0 +1,199 @@
+---
+title: 'hyperliquidFillsPortalSource()'
+description: 'Create a portal source for Hyperliquid fills data'
+---
+
+## Overview
+
+Creates a portal source that streams Hyperliquid fills data from the Subsquid Network. This source provides access to trading fills from the Hyperliquid exchange, including user trades, prices, sizes, and fees.
+
+## Signature
+
+```typescript
+function hyperliquidFillsPortalSource<F extends hyperliquidFills.FieldSelection = any>(options: {
+  portal: string | PortalClientOptions
+  query?: PortalRange | HyperliquidFillsQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+}): PortalSource<HyperliquidFillsQueryBuilder<F>, HyperliquidFillsPortalData<F>>
+```
+
+## Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions" required>
+  Portal URL or client configuration options for connecting to the Subsquid Network.
+</ParamField>
+
+<ParamField path="query" type="PortalRange | HyperliquidFillsQueryBuilder<F>">
+  Query configuration specifying which fills to retrieve. Can be a simple range object or a HyperliquidFillsQueryBuilder instance for advanced filtering.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Cache configuration for storing and retrieving portal data locally.
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Metrics server instance for exposing observability metrics.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level string (`'trace'`, `'debug'`, `'info'`, `'warn'`, `'error'`). Defaults to `'info'`.
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Progress tracking configuration with callbacks for monitoring ingestion progress.
+  
+  <Expandable title="properties">
+    <ResponseField name="interval" type="number">
+      Update interval in milliseconds for progress reports.
+    </ResponseField>
+    <ResponseField name="onStart" type="function">
+      Callback invoked when ingestion starts.
+    </ResponseField>
+    <ResponseField name="onProgress" type="function">
+      Callback invoked on each progress update.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+## Returns
+
+Returns a `PortalSource` instance that can be used in a pipeline with `.pipe()` to transform and process Hyperliquid fills data.
+
+## Types
+
+### HyperliquidFillsPortalData
+
+```typescript
+type HyperliquidFillsPortalData<F extends hyperliquidFills.FieldSelection> = {
+  blocks: hyperliquidFills.Block<F>[]
+}
+```
+
+The data object passed to transformers and targets contains an array of blocks, each with fills matching your field selection.
+
+### HyperliquidFillsTransformer
+
+```typescript
+type HyperliquidFillsTransformer<In, Out> = Transformer<In, Out, HyperliquidFillsQueryBuilder>
+```
+
+Type definition for transformers that work with Hyperliquid fills data.
+
+## Example
+
+### Basic usage
+
+```typescript
+import { hyperliquidFillsPortalSource } from '@subsquid/pipes'
+
+const source = hyperliquidFillsPortalSource({
+  portal: 'https://v2.archive.subsquid.io/hyperliquid',
+  query: { from: 0 },
+  logger: 'info'
+})
+```
+
+### With query builder
+
+```typescript
+import { 
+  hyperliquidFillsPortalSource, 
+  HyperliquidFillsQueryBuilder 
+} from '@subsquid/pipes'
+
+const source = hyperliquidFillsPortalSource({
+  portal: 'https://v2.archive.subsquid.io/hyperliquid',
+  query: new HyperliquidFillsQueryBuilder()
+    .addFields({
+      block: { number: true, timestamp: true },
+      fill: { user: true, coin: true, px: true, sz: true, side: true }
+    })
+    .addFill({
+      range: { from: 0 },
+      request: { coin: ['BTC', 'ETH'] }
+    }),
+  logger: 'debug'
+})
+```
+
+### With progress tracking
+
+```typescript
+const source = hyperliquidFillsPortalSource({
+  portal: 'https://v2.archive.subsquid.io/hyperliquid',
+  query: { from: 0 },
+  progress: {
+    interval: 5000,
+    onStart: () => console.log('Started ingestion'),
+    onProgress: (info) => console.log(`Progress: ${info.currentBlock}`)
+  }
+})
+```
+
+### Complete pipeline
+
+```typescript
+import { 
+  hyperliquidFillsPortalSource,
+  HyperliquidFillsQueryBuilder,
+  createTransformer,
+  drizzleTarget
+} from '@subsquid/pipes'
+import { drizzle } from 'drizzle-orm/node-postgres'
+
+const source = hyperliquidFillsPortalSource({
+  portal: 'https://v2.archive.subsquid.io/hyperliquid',
+  query: new HyperliquidFillsQueryBuilder()
+    .addFields({
+      block: { number: true, timestamp: true },
+      fill: { 
+        user: true, 
+        coin: true, 
+        px: true, 
+        sz: true, 
+        side: true,
+        fee: true 
+      }
+    })
+    .addFill({
+      range: { from: 0 },
+      request: { coin: ['BTC'] }
+    })
+})
+
+const transform = createTransformer({
+  transform: (data) => {
+    return data.blocks.flatMap(block => 
+      block.fills.map(fill => ({
+        blockNumber: block.header.number,
+        timestamp: block.header.timestamp,
+        user: fill.user,
+        coin: fill.coin,
+        price: fill.px,
+        size: fill.sz,
+        side: fill.side,
+        fee: fill.fee
+      }))
+    )
+  }
+})
+
+const target = drizzleTarget({
+  db: drizzle(process.env.DATABASE_URL),
+  tables: [fillsTable],
+  onData: async ({ tx, data }) => {
+    await tx.insert(fillsTable).values(data)
+  }
+})
+
+source.pipe(transform).pipe(target).start()
+```
+
+## Related
+
+- [HyperliquidFillsQueryBuilder](/api/hyperliquid/query-builder) - Build advanced queries for Hyperliquid fills
+- [Portal Sources](/core/sources) - Learn about portal sources
+- [Transformers](/core/transformers) - Transform data between source and target

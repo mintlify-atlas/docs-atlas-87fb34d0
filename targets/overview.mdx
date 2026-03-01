@@ -1,0 +1,165 @@
+---
+title: Targets Overview
+description: Understanding targets in Subsquid Pipes SDK
+---
+
+Targets are the final destination for your processed blockchain data in Subsquid Pipes. They handle data persistence, state management, and rollback capabilities.
+
+## What is a Target?
+
+A target is responsible for:
+- **Writing processed data** to a storage system
+- **Managing indexer state** to track processing progress
+- **Handling rollbacks** when blockchain reorganizations occur
+- **Providing transactional guarantees** for data consistency
+
+## Available Targets
+
+<CardGroup cols={2}>
+  <Card title="ClickHouse" icon="database" href="/targets/clickhouse">
+    High-performance columnar database for analytics workloads
+  </Card>
+  <Card title="Drizzle/PostgreSQL" icon="elephant" href="/targets/drizzle">
+    PostgreSQL with Drizzle ORM and automatic rollback support
+  </Card>
+  <Card title="Custom Target" icon="wrench" href="/targets/custom">
+    Build your own target implementation
+  </Card>
+</CardGroup>
+
+## Target Interface
+
+All targets implement the same core interface:
+
+```typescript
+type Target<In> = {
+  write: (writer: {
+    read: (cursor?: BlockCursor) => AsyncIterableIterator<PortalBatch<In>>
+    logger: Logger
+  }) => Promise<void>
+  fork?: (previousBlocks: BlockCursor[]) => Promise<BlockCursor | null>
+}
+```
+
+### Core Methods
+
+<ParamField path="write" type="function" required>
+  The main processing function that reads batches of data and writes them to the target storage.
+  
+  <Expandable title="parameters">
+    <ParamField path="writer.read" type="function">
+      Iterator that yields batches of processed data, starting from an optional cursor
+    </ParamField>
+    <ParamField path="writer.logger" type="Logger">
+      Logger instance for debug and info messages
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="fork" type="function">
+  Optional method called when a blockchain reorganization is detected. Should revert data to a safe state.
+  
+  <Expandable title="parameters">
+    <ParamField path="previousBlocks" type="BlockCursor[]">
+      Array of block cursors representing the fork history
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Using Targets with Pipes
+
+Targets are used at the end of a pipe chain with the `.pipeTo()` method:
+
+```typescript
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet'
+})
+  .pipe(
+    evmDecoder({
+      events: { transfers: commonAbis.erc20.events.Transfer }
+    })
+  )
+  .pipeTo(
+    drizzleTarget({
+      db: drizzle('postgresql://...'),
+      tables: [transfersTable],
+      onData: async ({ tx, data }) => {
+        await tx.insert(transfersTable).values(data.transfers)
+      }
+    })
+  )
+```
+
+## State Management
+
+Targets automatically track the last processed block cursor to enable:
+
+- **Resume from interruption** - Restart indexing from the last committed block
+- **Idempotency** - Skip already-processed blocks on restart
+- **Fork detection** - Detect blockchain reorganizations
+
+<Note>
+State is typically stored in the same database as your data, using a dedicated table or collection.
+</Note>
+
+## Rollback Support
+
+### Why Rollbacks Matter
+
+Blockchains can reorganize when:
+- Network partitions occur
+- Multiple blocks are mined at similar times
+- Validators disagree on block validity
+
+When this happens, your indexer needs to revert data from invalidated blocks.
+
+### How Targets Handle Rollbacks
+
+Targets provide different rollback strategies:
+
+<AccordionGroup>
+  <Accordion title="Snapshot-based (Drizzle)">
+    Automatically creates snapshots of all data changes. On fork, rolls back using these snapshots.
+    
+    **Pros:** Automatic, handles complex schemas  
+    **Cons:** Requires additional storage
+  </Accordion>
+  
+  <Accordion title="Manual (ClickHouse)">
+    You implement the rollback logic in the `onRollback` callback.
+    
+    **Pros:** Full control, efficient for simple schemas  
+    **Cons:** Requires manual implementation
+  </Accordion>
+</AccordionGroup>
+
+## Choosing a Target
+
+<Steps>
+  <Step title="Identify your query patterns">
+    - **Analytics/aggregations** → ClickHouse
+    - **Relational queries** → PostgreSQL/Drizzle
+    - **Custom requirements** → Build your own
+  </Step>
+  
+  <Step title="Consider your data model">
+    - **Complex relationships** → Drizzle (automatic rollbacks)
+    - **Simple inserts** → ClickHouse (manual rollbacks)
+  </Step>
+  
+  <Step title="Evaluate operational needs">
+    - **Existing infrastructure** → Match your stack
+    - **Team expertise** → Use familiar tools
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="ClickHouse Target" icon="database" href="/targets/clickhouse">
+    Learn how to use ClickHouse for high-performance analytics
+  </Card>
+  <Card title="Drizzle Target" icon="elephant" href="/targets/drizzle">
+    Use PostgreSQL with automatic rollback support
+  </Card>
+</CardGroup>

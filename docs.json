@@ -1,122 +1,144 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Subsquid Pipes SDK",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#FF6B35",
+    "light": "#FFB4A2",
+    "dark": "#CC5528"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/subsquid-labs/pipes-sdk"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/subsquid-labs/pipes-sdk"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "core/pipelines",
+              "core/sources",
+              "core/transformers",
+              "core/targets",
+              "core/fork-handling"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "EVM",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "evm/overview",
+              "evm/portal-source",
+              "evm/decoder",
+              "evm/factory-contracts",
+              "evm/query-builder"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Solana",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "solana/overview",
+              "solana/portal-source",
+              "solana/instruction-decoder",
+              "solana/query-builder"
+            ]
+          },
+          {
+            "group": "Hyperliquid",
+            "pages": [
+              "hyperliquid/overview",
+              "hyperliquid/fills-source"
+            ]
+          },
+          {
+            "group": "Targets",
+            "pages": [
+              "targets/overview",
+              "targets/clickhouse",
+              "targets/drizzle",
+              "targets/custom"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/logging",
+              "observability/profiling",
+              "observability/metrics"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/portal-cache",
+              "advanced/composite-transformers",
+              "advanced/progress-tracking"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core API",
             "pages": [
-              "api-reference/introduction"
+              "api/portal-source",
+              "api/transformer",
+              "api/target",
+              "api/types"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "EVM API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/evm/portal-source",
+              "api/evm/decoder",
+              "api/evm/factory",
+              "api/evm/query-builder"
+            ]
+          },
+          {
+            "group": "Solana API",
+            "pages": [
+              "api/solana/portal-source",
+              "api/solana/instruction-decoder",
+              "api/solana/query-builder"
+            ]
+          },
+          {
+            "group": "Hyperliquid API",
+            "pages": [
+              "api/hyperliquid/fills-source",
+              "api/hyperliquid/query-builder"
+            ]
+          },
+          {
+            "group": "Targets API",
+            "pages": [
+              "api/targets/clickhouse",
+              "api/targets/drizzle"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

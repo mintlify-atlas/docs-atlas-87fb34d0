@@ -1,0 +1,444 @@
+---
+title: 'Core Types'
+description: 'Type definitions for the Subsquid Pipes SDK'
+---
+
+## Overview
+
+Core TypeScript types used throughout the Subsquid Pipes SDK.
+
+## BlockCursor
+
+Represents a specific position in the blockchain.
+
+```typescript
+type BlockCursor = {
+  number: number
+  hash?: string
+  timestamp?: number
+}
+```
+
+<ResponseField name="number" type="number" required>
+  Block number (height)
+</ResponseField>
+
+<ResponseField name="hash" type="string">
+  Block hash (optional)
+</ResponseField>
+
+<ResponseField name="timestamp" type="number">
+  Block timestamp in seconds (optional)
+</ResponseField>
+
+### Usage
+
+```typescript
+const cursor: BlockCursor = {
+  number: 1000000,
+  hash: '0x1234...',
+  timestamp: 1640000000,
+}
+
+// Resume from cursor
+for await (const batch of read(cursor)) {
+  // Process from block 1000001 onwards
+}
+```
+
+## Ctx
+
+Base context type providing logger and profiler.
+
+```typescript
+type Ctx = {
+  logger: Logger
+  profiler: Profiler
+}
+```
+
+<ResponseField name="logger" type="Logger">
+  Pino logger instance for logging operations
+</ResponseField>
+
+<ResponseField name="profiler" type="Profiler">
+  Profiler instance for performance measurement
+</ResponseField>
+
+### Usage
+
+```typescript
+function myFunction(ctx: Ctx) {
+  ctx.logger.info('Starting operation')
+  
+  const span = ctx.profiler.start('my-operation')
+  // ... do work ...
+  span.end()
+}
+```
+
+## BatchCtx
+
+Extended context provided to transformers for each batch.
+
+```typescript
+type BatchCtx = {
+  head: {
+    finalized?: BlockCursor
+    latest?: BlockCursor
+  }
+  state: {
+    initial: number
+    last: number
+    current: BlockCursor
+    rollbackChain: BlockCursor[]
+    progress?: ProgressState
+  }
+  meta: {
+    bytesSize: number
+    requests: Record<number, number>
+    lastBlockReceivedAt: Date
+  }
+  query: {
+    url: string
+    hash: string
+    raw: any
+  }
+  profiler: Profiler
+  metrics: Metrics
+  logger: Logger
+}
+```
+
+### Fields
+
+<ResponseField name="head" type="object">
+  Information about the blockchain head
+  
+  <ResponseField name="finalized" type="BlockCursor">
+    Latest finalized block cursor
+  </ResponseField>
+  
+  <ResponseField name="latest" type="BlockCursor">
+    Latest known block cursor (may be unfinalized)
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="state" type="object">
+  Current processing state
+  
+  <ResponseField name="initial" type="number" required>
+    Initial block number where processing started
+  </ResponseField>
+  
+  <ResponseField name="last" type="number" required>
+    Last block number to process
+  </ResponseField>
+  
+  <ResponseField name="current" type="BlockCursor" required>
+    Current block cursor (last block in this batch)
+  </ResponseField>
+  
+  <ResponseField name="rollbackChain" type="BlockCursor[]" required>
+    List of unfinalized block cursors in chronological order. Used for handling blockchain forks by tracking alternative chain versions.
+  </ResponseField>
+  
+  <ResponseField name="progress" type="ProgressState">
+    Current progress state with completion percentage and processed blocks count
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="meta" type="object">
+  Batch metadata
+  
+  <ResponseField name="bytesSize" type="number" required>
+    Size of the batch in bytes
+  </ResponseField>
+  
+  <ResponseField name="requests" type="Record<number, number>" required>
+    Map of request IDs to counts
+  </ResponseField>
+  
+  <ResponseField name="lastBlockReceivedAt" type="Date" required>
+    Timestamp when the last block was received
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="query" type="object">
+  Query information
+  
+  <ResponseField name="url" type="string" required>
+    Portal URL
+  </ResponseField>
+  
+  <ResponseField name="hash" type="string" required>
+    Hash of the query for caching
+  </ResponseField>
+  
+  <ResponseField name="raw" type="any" required>
+    Raw query object
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="profiler" type="Profiler" required>
+  Profiler instance for this batch
+</ResponseField>
+
+<ResponseField name="metrics" type="Metrics" required>
+  Metrics collector
+</ResponseField>
+
+<ResponseField name="logger" type="Logger" required>
+  Logger instance
+</ResponseField>
+
+### Usage
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const transformer = createTransformer({
+  transform: (data, ctx) => {
+    // Access batch context
+    ctx.logger.info(
+      `Processing block ${ctx.state.current.number} ` +
+      `(${ctx.state.current.number - ctx.state.initial + 1} of ` +
+      `${ctx.state.last - ctx.state.initial + 1})`
+    )
+    
+    // Check finalization status
+    if (ctx.head.finalized && ctx.state.current.number > ctx.head.finalized.number) {
+      ctx.logger.warn('Processing unfinalized blocks')
+    }
+    
+    // Measure performance
+    const span = ctx.profiler.start('process-data')
+    const result = processData(data)
+    span.end()
+    
+    // Report metrics
+    ctx.metrics.recordBlocksProcessed(data.blocks.length)
+    
+    return result
+  },
+})
+```
+
+## PortalBatch
+
+A batch of data from the Portal with context.
+
+```typescript
+type PortalBatch<T = any> = {
+  data: T
+  ctx: BatchCtx
+}
+```
+
+<ResponseField name="data" type="T" required>
+  The batch data (transformed or raw)
+</ResponseField>
+
+<ResponseField name="ctx" type="BatchCtx" required>
+  Batch context
+</ResponseField>
+
+### Usage
+
+```typescript
+for await (const batch of source) {
+  // Access data
+  console.log('Blocks:', batch.data.blocks.length)
+  
+  // Access context
+  console.log('Current block:', batch.ctx.state.current.number)
+  console.log('Progress:', batch.ctx.state.progress?.percentage)
+}
+```
+
+## ProgressState
+
+Progress tracking information.
+
+```typescript
+type ProgressState = {
+  percentage: number
+  processedBlocks: number
+  totalBlocks: number
+  blocksPerSecond: number
+  estimatedTimeRemaining?: number
+}
+```
+
+<ResponseField name="percentage" type="number" required>
+  Completion percentage (0-100)
+</ResponseField>
+
+<ResponseField name="processedBlocks" type="number" required>
+  Number of blocks processed so far
+</ResponseField>
+
+<ResponseField name="totalBlocks" type="number" required>
+  Total number of blocks to process
+</ResponseField>
+
+<ResponseField name="blocksPerSecond" type="number" required>
+  Current processing speed
+</ResponseField>
+
+<ResponseField name="estimatedTimeRemaining" type="number">
+  Estimated seconds until completion
+</ResponseField>
+
+### Usage
+
+```typescript
+const source = new PortalSource({
+  portal: 'https://portal.subsquid.io',
+  query,
+  logger,
+  progress: {
+    interval: 5000,
+    onProgress: (progress) => {
+      console.log(`Progress: ${progress.percentage.toFixed(2)}%`)
+      console.log(`Speed: ${progress.blocksPerSecond.toFixed(2)} blocks/s`)
+      
+      if (progress.estimatedTimeRemaining) {
+        const minutes = Math.floor(progress.estimatedTimeRemaining / 60)
+        console.log(`ETA: ${minutes} minutes`)
+      }
+    },
+  },
+})
+```
+
+## StartState
+
+State information provided when processing starts.
+
+```typescript
+type StartState = {
+  current?: BlockCursor
+  initial: number
+}
+```
+
+<ResponseField name="current" type="BlockCursor">
+  Current cursor if resuming from a previous run
+</ResponseField>
+
+<ResponseField name="initial" type="number" required>
+  Initial block number where processing starts
+</ResponseField>
+
+### Usage
+
+```typescript
+const source = new PortalSource({
+  portal: 'https://portal.subsquid.io',
+  query,
+  logger,
+  progress: {
+    onStart: (state) => {
+      if (state.current) {
+        console.log(`Resuming from block ${state.current.number}`)
+      } else {
+        console.log(`Starting from block ${state.initial}`)
+      }
+    },
+  },
+})
+```
+
+## Logger
+
+Pino logger instance.
+
+```typescript
+import pino from 'pino'
+
+type Logger = pino.Logger
+```
+
+### Common Methods
+
+```typescript
+logger.debug('Debug message')
+logger.info('Info message')
+logger.warn('Warning message')
+logger.error('Error message')
+
+// With context
+logger.info({ blockNumber: 123 }, 'Processing block')
+logger.error({ error }, 'Failed to process')
+```
+
+## Profiler
+
+Performance profiling interface.
+
+```typescript
+interface Profiler {
+  start(id: string): Span
+  end(): void
+}
+
+interface Span {
+  start(id: string): Span
+  end(): void
+  addTransformerExemplar(data: any): void
+}
+```
+
+### Usage
+
+```typescript
+function processData(data: any, ctx: BatchCtx) {
+  const span = ctx.profiler.start('process-data')
+  
+  const parseSpan = span.start('parse')
+  const parsed = parseData(data)
+  parseSpan.end()
+  
+  const transformSpan = span.start('transform')
+  const transformed = transformData(parsed)
+  transformSpan.end()
+  
+  span.end()
+  
+  return transformed
+}
+```
+
+## Metrics
+
+Metrics collection interface.
+
+```typescript
+interface Metrics {
+  recordBlocksProcessed(count: number): void
+  recordBytesProcessed(bytes: number): void
+  recordTransformDuration(duration: number): void
+  // ... other metric methods
+}
+```
+
+### Usage
+
+```typescript
+import { createTransformer } from '@subsquid/pipes'
+
+const transformer = createTransformer({
+  transform: (data, ctx) => {
+    const start = Date.now()
+    
+    const result = processBlocks(data.blocks)
+    
+    const duration = Date.now() - start
+    ctx.metrics.recordBlocksProcessed(data.blocks.length)
+    ctx.metrics.recordTransformDuration(duration)
+    
+    return result
+  },
+})
+```

@@ -1,0 +1,289 @@
+---
+title: Hyperliquid fills portal source
+description: Stream Hyperliquid perpetual futures fills data from Subsquid Portal
+---
+
+The `hyperliquidFillsPortalSource` function creates a data source for streaming Hyperliquid perpetual futures fills data from Subsquid Portal datasets.
+
+## Function signature
+
+```typescript
+function hyperliquidFillsPortalSource<F extends hyperliquidFills.FieldSelection>({
+  portal,
+  query,
+  cache,
+  logger,
+  metrics,
+  progress,
+}: {
+  portal: string | PortalClientOptions
+  query?: PortalRange | HyperliquidFillsQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+}): PortalSource<HyperliquidFillsQueryBuilder<F>, HyperliquidFillsPortalData<F>>
+```
+
+From `hyperliquid-fills-portal-source.ts:23-69`
+
+## Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions" required>
+  Portal endpoint URL or client options. Use `https://portal.sqd.dev/datasets/hl-node-fills` for Hyperliquid fills data.
+</ParamField>
+
+<ParamField path="query" type="PortalRange | HyperliquidFillsQueryBuilder<F>">
+  Query configuration. Can be:
+  - A `PortalRange` object with `from` and `to` block numbers
+  - A `HyperliquidFillsQueryBuilder` instance for advanced queries
+  
+  If omitted, streams all available blocks.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Optional portal cache implementation for improved performance. See [portal cache](/advanced/portal-cache) documentation.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level (`'trace'`, `'debug'`, `'info'`, `'warn'`, `'error'`). See [logging](/observability/logging) documentation.
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Metrics server for Prometheus metrics collection. See [metrics](/observability/metrics) documentation.
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Progress tracking configuration. See [progress tracking](/advanced/progress-tracking) documentation.
+</ParamField>
+
+## Return type
+
+Returns a `PortalSource` instance that yields batches of Hyperliquid fills data.
+
+```typescript
+type HyperliquidFillsPortalData<F extends hyperliquidFills.FieldSelection> = {
+  blocks: hyperliquidFills.Block<F>[]
+}
+```
+
+## Query builder
+
+Use `HyperliquidFillsQueryBuilder` to construct type-safe queries:
+
+```typescript
+import { HyperliquidFillsQueryBuilder } from '@subsquid/pipes/hyperliquid'
+
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    fill: {
+      tid: true,       // Trade ID
+      user: true,      // User address
+      px: true,        // Price
+      sz: true,        // Size
+      side: true,      // Buy/sell
+      coin: true,      // Trading pair
+      time: true,      // Timestamp
+      closedPnl: true, // Closed P&L
+    },
+  })
+  .addFill({
+    request: {},
+    range: { from: 750_000_000 }, // Minimum supported block
+  })
+```
+
+See [query builder API](/api/hyperliquid/query-builder) for all available methods.
+
+## Field notation
+
+Hyperliquid uses abbreviated field names following their API notation:
+
+- `tid` - Trade ID
+- `oid` - Order ID
+- `px` - Price
+- `sz` - Size
+- `coin` - Trading pair
+- `closedPnl` - Closed profit and loss
+
+See [Hyperliquid API notation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/notation) for the complete reference.
+
+## Examples
+
+### Basic usage
+
+Stream all Hyperliquid fills with default configuration:
+
+```typescript
+import { hyperliquidFillsPortalSource } from '@subsquid/pipes/hyperliquid'
+
+const stream = hyperliquidFillsPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/hl-node-fills',
+})
+
+for await (const { data } of stream) {
+  for (const block of data.blocks) {
+    console.log(`Block ${block.header.number}: ${block.fills.length} fills`)
+  }
+}
+```
+
+### Query specific fills
+
+From `01.user-fills.example.ts:6-48`:
+
+```typescript
+import { 
+  HyperliquidFillsQueryBuilder, 
+  hyperliquidFillsPortalSource 
+} from '@subsquid/pipes/hyperliquid'
+
+const queryBuilder = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    fill: {
+      tid: true,
+      fillIndex: true,
+      user: true,
+      px: true,
+      sz: true,
+      side: true,
+      coin: true,
+      time: true,
+      closedPnl: true,
+    },
+  })
+  .addFill({
+    request: {},
+    range: {
+      from: 750_000_000, // Minimum supported block
+    },
+  })
+
+const stream = hyperliquidFillsPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/hl-node-fills',
+  query: queryBuilder,
+})
+
+for await (const { data } of stream) {
+  for (const block of data.blocks) {
+    if (block.fills.length === 0) continue
+    
+    console.log(block.fills)
+  }
+}
+```
+
+### With progress tracking
+
+```typescript
+import { hyperliquidFillsPortalSource } from '@subsquid/pipes/hyperliquid'
+
+const stream = hyperliquidFillsPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/hl-node-fills',
+  progress: {
+    interval: 10_000, // Log every 10,000 blocks
+    onProgress: (state) => {
+      console.log(`Processed ${state.current.number} blocks`)
+    },
+  },
+})
+```
+
+### With logging and metrics
+
+```typescript
+import { hyperliquidFillsPortalSource } from '@subsquid/pipes/hyperliquid'
+import { createMetricsServer } from '@subsquid/pipes'
+
+const stream = hyperliquidFillsPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/hl-node-fills',
+  logger: 'debug',
+  metrics: createMetricsServer({ port: 9090 }),
+})
+```
+
+## Block range constraints
+
+<Warning>
+  Hyperliquid fills data is only available from block `750,000,000` onwards. Queries for earlier blocks will return no data.
+</Warning>
+
+Always specify a `from` value of at least `750_000_000` in your queries:
+
+```typescript
+.addFill({
+  request: {},
+  range: { from: 750_000_000 },
+})
+```
+
+## Data structure
+
+Each batch contains an array of blocks with fills:
+
+```typescript
+type HyperliquidFillsPortalData<F> = {
+  blocks: Array<{
+    header: {
+      number: number
+      hash: string
+      timestamp: number
+    }
+    fills: Array<{
+      tid: number           // Trade ID
+      fillIndex: number     // Fill index
+      oid: number          // Order ID
+      user: string         // User address
+      px: string           // Price
+      sz: string           // Size
+      side: string         // 'A' (ask/sell) or 'B' (bid/buy)
+      coin: string         // Trading pair
+      time: number         // Timestamp
+      closedPnl: string    // Closed P&L
+      // ... other fields as selected
+    }>
+  }>
+}
+```
+
+## Best practices
+
+<Tip>
+  Use `addFields()` to select only the fields you need. This reduces bandwidth and improves performance.
+</Tip>
+
+**Do:**
+- Always specify `from: 750_000_000` or higher in your range
+- Select only required fields using `addFields()`
+- Use progress tracking for long-running indexers
+- Filter fills by user address or trading pair when possible
+
+**Don't:**
+- Query blocks before 750,000,000
+- Request all fields if you only need a subset
+- Process fills without checking if the array is empty
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Overview" icon="book" href="/hyperliquid/overview">
+    Hyperliquid support overview
+  </Card>
+  <Card title="Query builder API" icon="code" href="/api/hyperliquid/query-builder">
+    HyperliquidFillsQueryBuilder API reference
+  </Card>
+  <Card title="Portal source API" icon="code" href="/api/hyperliquid/fills-source">
+    Complete API reference
+  </Card>
+  <Card title="Progress tracking" icon="chart-line" href="/advanced/progress-tracking">
+    Monitor indexing progress
+  </Card>
+</CardGroup>

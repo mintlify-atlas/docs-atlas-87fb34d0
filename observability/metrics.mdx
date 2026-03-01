@@ -1,0 +1,399 @@
+---
+title: Metrics
+description: Prometheus metrics for monitoring Subsquid Pipes
+---
+
+Subsquid Pipes provides built-in Prometheus metrics for monitoring your data processing pipeline. You can expose default metrics and create custom metrics for application-specific monitoring.
+
+## Metrics Server
+
+The metrics server exposes a Prometheus-compatible endpoint for scraping metrics.
+
+### Setup
+
+Import and configure the metrics server:
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+import { metricsServer } from '@subsquid/pipes/metrics/node'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  metrics: metricsServer({
+    port: 9090, // Default: 9090
+  }),
+})
+```
+
+The metrics endpoint is available at `http://localhost:9090/metrics`.
+
+## Metrics Interface
+
+The `Metrics` interface provides methods for creating different metric types:
+
+```typescript
+type Metrics = {
+  counter<T extends string>(options: CounterConfiguration<T>): Counter<T>
+  gauge<T extends string>(options: GaugeConfiguration<T>): Gauge<T>
+  histogram<T extends string>(options: HistogramConfiguration<T>): Histogram<T>
+  summary<T extends string>(options: SummaryConfiguration<T>): Summary<T>
+}
+```
+
+## Counter
+
+Counters track cumulative values that only increase:
+
+### Type Definition
+
+```typescript
+interface Counter<T extends string = string> {
+  inc(labels: LabelValues<T>, value: number): void
+  inc(value: number): void
+}
+
+interface CounterConfiguration<T extends string> {
+  name: string
+  help: string
+  labelNames?: T[] | readonly T[]
+  aggregator?: 'omit' | 'sum' | 'first' | 'min' | 'max' | 'average'
+  collect?: (this: Counter<T>) => void | Promise<void>
+  enableExemplars?: boolean
+}
+```
+
+### Example: Counting Transfers
+
+```typescript
+import { evmPortalSource, evmDecoder } from '@subsquid/pipes/evm'
+import { commonAbis } from '@subsquid/pipes/evm'
+import { metricsServer } from '@subsquid/pipes/metrics/node'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  metrics: metricsServer({ port: 9090 }),
+}).pipe(
+  evmDecoder({
+    range: { from: 'latest' },
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }),
+)
+
+for await (const { data, ctx } of stream) {
+  console.log(`parsed ${data.transfers.length} transfers`)
+
+  ctx.metrics
+    .counter({ 
+      name: 'my_transfers_counter', 
+      help: 'Number of processed transactions' 
+    })
+    .inc(data.transfers.length)
+}
+```
+
+Metrics output at `http://localhost:9090/metrics`:
+
+```prometheus
+# HELP my_transfers_counter Number of processed transactions
+# TYPE my_transfers_counter counter
+my_transfers_counter 218598
+```
+
+### Counter with Labels
+
+```typescript
+const counter = ctx.metrics.counter({
+  name: 'evm_events_total',
+  help: 'Total number of EVM events processed',
+  labelNames: ['event_type', 'network'],
+})
+
+counter.inc({ event_type: 'Transfer', network: 'ethereum' }, data.transfers.length)
+counter.inc({ event_type: 'Approval', network: 'ethereum' }, data.approvals.length)
+```
+
+Output:
+
+```prometheus
+evm_events_total{event_type="Transfer",network="ethereum"} 150000
+evm_events_total{event_type="Approval",network="ethereum"} 50000
+```
+
+## Gauge
+
+Gauges represent values that can increase or decrease:
+
+### Type Definition
+
+```typescript
+interface Gauge<T extends string = string> {
+  set(value: number): void
+  set(labels: LabelValues<T>, value: number): void
+}
+
+interface GaugeConfiguration<T extends string> {
+  name: string
+  help: string
+  labelNames?: T[] | readonly T[]
+  aggregator?: 'omit' | 'sum' | 'first' | 'min' | 'max' | 'average'
+  collect?: (this: Gauge<T>) => void | Promise<void>
+  enableExemplars?: boolean
+}
+```
+
+### Example: Tracking Latency
+
+```typescript
+import { evmPortalSource, evmRpcLatencyWatcher } from '@subsquid/pipes/evm'
+import { metricsServer } from '@subsquid/pipes/metrics/node'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+  query: { from: 'latest' },
+  metrics: metricsServer({ port: 9090 }),
+}).pipe(
+  evmRpcLatencyWatcher({
+    rpcUrl: ['https://base.drpc.org', 'https://base-rpc.publicnode.com'],
+  }).pipe((data, { metrics }) => {
+    if (!data) return
+
+    for (const rpc of data.rpc) {
+      metrics
+        .gauge({
+          name: 'rpc_latency_ms',
+          help: 'RPC Latency in ms',
+          labelNames: ['url'],
+        })
+        .set({ url: rpc.url }, rpc.portalDelayMs)
+    }
+
+    return data
+  }),
+)
+
+for await (const { data } of stream) {
+  if (!data) continue
+  console.log(`Block ${data.number}: RPC latency tracked`)
+}
+```
+
+Output:
+
+```prometheus
+# HELP rpc_latency_ms RPC Latency in ms
+# TYPE rpc_latency_ms gauge
+rpc_latency_ms{url="https://base.drpc.org"} 646
+rpc_latency_ms{url="https://base-rpc.publicnode.com"} 642
+```
+
+## Histogram
+
+Histograms sample observations and count them in configurable buckets:
+
+### Type Definition
+
+```typescript
+interface Histogram<T extends string = string> {
+  observe(value: number): void
+}
+
+interface HistogramConfiguration<T extends string> {
+  name: string
+  help: string
+  labelNames?: T[] | readonly T[]
+  buckets?: number[]
+  aggregator?: 'omit' | 'sum' | 'first' | 'min' | 'max' | 'average'
+  collect?: (this: Histogram<T>) => void | Promise<void>
+  enableExemplars?: boolean
+}
+```
+
+### Example: Request Duration
+
+```typescript
+const histogram = ctx.metrics.histogram({
+  name: 'batch_processing_duration_seconds',
+  help: 'Time spent processing each batch',
+  buckets: [0.1, 0.5, 1, 2, 5, 10],
+})
+
+const start = Date.now()
+// ... process batch ...
+const duration = (Date.now() - start) / 1000
+
+histogram.observe(duration)
+```
+
+## Summary
+
+Summaries sample observations and calculate configurable quantiles:
+
+### Type Definition
+
+```typescript
+interface Summary<T extends string> {
+  observe(value: number): void
+  observe(labels: LabelValues<T>, value: number): void
+}
+
+interface SummaryConfiguration<T extends string> {
+  name: string
+  help: string
+  labelNames?: T[] | readonly T[]
+  percentiles?: number[]
+  maxAgeSeconds?: number
+  ageBuckets?: number
+  pruneAgedBuckets?: boolean
+  compressCount?: number
+  collect?: (this: Summary<T>) => void | Promise<void>
+}
+```
+
+### Example: Transaction Size
+
+```typescript
+const summary = ctx.metrics.summary({
+  name: 'transaction_size_bytes',
+  help: 'Size of processed transactions',
+  percentiles: [0.5, 0.9, 0.99],
+})
+
+for (const tx of data.transactions) {
+  summary.observe(tx.input.length)
+}
+```
+
+## MetricsServer Interface
+
+```typescript
+type MetricsServer = {
+  start(): void
+  stop(): Promise<void>
+  addBatchContext(ctx: BatchCtx): void
+  setLogger?(logger: any, override?: boolean): void
+  metrics: Metrics
+}
+```
+
+### No-op Metrics Server
+
+When metrics are disabled, a no-op server is used:
+
+```typescript
+import { noopMetricsServer } from '@subsquid/pipes'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  metrics: noopMetricsServer(), // All metric calls are no-ops
+})
+```
+
+## Label Values
+
+Labels must be strings or numbers:
+
+```typescript
+type LabelValues<T extends string> = Partial<Record<T, string | number>>
+```
+
+Example:
+
+```typescript
+const counter = ctx.metrics.counter({
+  name: 'requests_total',
+  help: 'Total requests',
+  labelNames: ['method', 'status'],
+})
+
+counter.inc({ method: 'GET', status: 200 }, 1)
+counter.inc({ method: 'POST', status: 201 }, 1)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Choose the right metric type">
+    - **Counter**: Totals that only increase (requests, errors, events)
+    - **Gauge**: Values that fluctuate (memory usage, queue size, latency)
+    - **Histogram**: Distribution of values (request duration, response size)
+    - **Summary**: Like histograms but with quantiles (percentiles)
+  </Accordion>
+
+  <Accordion title="Use meaningful names">
+    Follow Prometheus naming conventions:
+    - Use snake_case: `http_requests_total`
+    - Include units as suffix: `_seconds`, `_bytes`, `_total`
+    - Be descriptive: `processed_transfers_total` not `transfers`
+  </Accordion>
+
+  <Accordion title="Keep label cardinality low">
+    Avoid labels with high cardinality (user IDs, timestamps):
+    
+    ```typescript
+    // Bad - high cardinality
+    counter.inc({ user_id: userId }, 1)
+    
+    // Good - low cardinality
+    counter.inc({ user_tier: 'premium' }, 1)
+    ```
+  </Accordion>
+
+  <Accordion title="Provide helpful descriptions">
+    Write clear `help` text:
+    
+    ```typescript
+    // Good
+    counter({ 
+      name: 'erc20_transfers_total',
+      help: 'Total number of ERC20 transfer events processed'
+    })
+    
+    // Avoid
+    counter({ 
+      name: 'transfers',
+      help: 'transfers'
+    })
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Monitoring Setup
+
+### Prometheus Configuration
+
+Add your Pipes indexer to `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'subsquid-pipes'
+    static_configs:
+      - targets: ['localhost:9090']
+```
+
+### Grafana Dashboard
+
+Query metrics in Grafana:
+
+```promql
+# Rate of transfers per second
+rate(my_transfers_counter[5m])
+
+# Average RPC latency
+avg(rpc_latency_ms)
+
+# 99th percentile processing duration
+histogram_quantile(0.99, batch_processing_duration_seconds)
+```
+
+## Default Metrics
+
+The SDK automatically exposes Node.js runtime metrics when the metrics server is enabled:
+
+- Process CPU usage
+- Memory usage
+- Event loop lag
+- Active handles and requests
+
+These metrics are prefixed with `nodejs_` and available at the `/metrics` endpoint.

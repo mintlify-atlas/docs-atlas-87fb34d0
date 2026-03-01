@@ -1,0 +1,93 @@
+---
+title: "Hyperliquid Support"
+description: "Overview of Hyperliquid data indexing with Subsquid Pipes"
+icon: "chart-line"
+---
+
+## Introduction
+
+Subsquid Pipes provides support for indexing Hyperliquid fills data through a specialized portal source. The Hyperliquid integration allows you to efficiently stream and process trading fills from the Hyperliquid decentralized exchange.
+
+## Available Data
+
+The Hyperliquid portal source provides access to:
+
+- **Block headers**: Block number, hash, parent hash, and timestamp
+- **Fills**: Trading fill data including user trades, prices, sizes, and fees
+
+## Key Components
+
+### Portal Source
+
+The [`hyperliquidFillsPortalSource`](/hyperliquid/fills-source) function creates a data stream for Hyperliquid fills.
+
+### Query Builder
+
+The [`HyperliquidFillsQueryBuilder`](/hyperliquid/fills-source#query-builder) allows you to:
+
+- Select specific fields from blocks and fills
+- Filter fills by user, coin, direction, and other criteria
+- Define block ranges for data retrieval
+
+## Quick Example
+
+```typescript
+import { 
+  HyperliquidFillsQueryBuilder, 
+  hyperliquidFillsPortalSource 
+} from '@subsquid/pipes/hyperliquid'
+
+const query = new HyperliquidFillsQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      timestamp: true,
+    },
+    fill: {
+      user: true,
+      coin: true,
+      px: true,
+      sz: true,
+      side: true,
+    },
+  })
+  .addFill({
+    request: {},
+    range: { from: 750_000_000 },
+  })
+
+const stream = hyperliquidFillsPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/hl-node-fills',
+  query,
+})
+
+for await (const { data } of stream) {
+  for (const block of data.blocks) {
+    console.log(block.fills)
+  }
+}
+```
+
+## Field Notation
+
+Hyperliquid uses specific abbreviations for fill fields. For complete documentation of field meanings, see the [Hyperliquid API documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/notation).
+
+Common fields:
+- `px` - Price
+- `sz` - Size
+- `tid` - Trade ID
+- `oid` - Order ID
+- `cloid` - Client order ID
+- `closedPnl` - Closed profit and loss
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Fills Portal Source" icon="database" href="/hyperliquid/fills-source">
+    Learn about the portal source and query builder
+  </Card>
+  
+  <Card title="Portal Sources" icon="plug" href="/core/sources">
+    Understand portal source configuration
+  </Card>
+</CardGroup>

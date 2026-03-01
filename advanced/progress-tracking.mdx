@@ -1,0 +1,396 @@
+---
+title: Progress Tracking
+description: Monitor indexing progress and performance metrics in real-time
+---
+
+Progress tracking provides real-time insights into your indexer's performance, including blocks processed, download speed, ETA, and request statistics.
+
+## Overview
+
+The `progressTracker` transformer monitors batch processing and reports detailed progress information at regular intervals.
+
+```typescript
+export function progressTracker<T>(options: ProgressTrackerOptions): Transformer<T, T>
+```
+
+## Configuration
+
+```typescript
+export type ProgressTrackerOptions = {
+  onStart?: (progress: StartState) => void;
+  onProgress?: (progress: ProgressState) => void;
+  interval?: number;
+  logger?: Logger;
+}
+```
+
+<ParamField path="interval" type="number" default="5000">
+  Interval in milliseconds between progress reports. Set to `0` to disable automatic reporting.
+</ParamField>
+
+<ParamField path="onStart" type="function">
+  Callback invoked when indexing starts. Receives initial state information.
+</ParamField>
+
+<ParamField path="onProgress" type="function">
+  Callback invoked at each interval with detailed progress metrics.
+</ParamField>
+
+<ParamField path="logger" type="Logger">
+  Logger instance for default progress output. If not provided, defaults will use the logger passed to PortalSource.
+</ParamField>
+
+## Basic Usage
+
+```typescript
+import { PortalSource, progressTracker } from '@subsquid/pipes';
+import { ethereum } from '@subsquid/pipes-ethereum';
+
+const source = new PortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: ethereum.query()
+    .block({ number: true })
+    .from(18_000_000),
+  logger
+})
+.pipe(progressTracker({
+  interval: 5000,  // Report every 5 seconds
+  logger
+}));
+
+for await (const batch of source) {
+  // Process data
+}
+```
+
+### Default Output
+
+With default settings, progress is logged automatically:
+
+```
+Start indexing from 18,000,000 block
+18,045,234 / 18,500,000 (45.2%), ETA: 2h 15m
+  blocks: 125.5 blocks/second
+  bytes: 2.3 MB/second
+  requests: 98.5% successful, 1.2% rate limited, 0.3% failed out of 1,234 requests
+```
+
+## State Types
+
+### StartState
+
+```typescript
+export type StartState = {
+  initial: number;        // Starting block number
+  current?: BlockCursor;  // Resume cursor (if resuming)
+}
+```
+
+### ProgressState
+
+```typescript
+export type ProgressState = {
+  state: {
+    initial: number;      // Starting block number
+    last: number;         // Target end block number
+    current: number;      // Current block number
+    percent: number;      // Completion percentage (0-100)
+    etaSeconds: number;   // Estimated time to completion in seconds
+  };
+  interval: {
+    requests: {
+      total: { count: number };
+      successful: { count: number; percent: number };
+      rateLimited: { count: number; percent: number };
+      failed: { count: number; percent: number };
+    };
+    processedBlocks: {
+      count: number;       // Blocks processed in this interval
+      perSecond: number;   // Processing rate
+    };
+    bytesDownloaded: {
+      count: number;       // Bytes downloaded in this interval
+      perSecond: number;   // Download rate
+    };
+  };
+}
+```
+
+## Custom Progress Handlers
+
+### Custom Console Output
+
+```typescript
+import { progressTracker, StartState, ProgressState } from '@subsquid/pipes';
+
+const tracker = progressTracker({
+  interval: 3000,
+  onStart: (state: StartState) => {
+    if (state.current) {
+      console.log(`Resuming from block #${state.current.number}`);
+    } else {
+      console.log(`Starting indexing from block #${state.initial}`);
+    }
+  },
+  onProgress: (progress: ProgressState) => {
+    const { state, interval } = progress;
+    console.log(`
+      Progress: ${state.percent.toFixed(1)}%
+      Current Block: ${state.current}
+      Blocks/sec: ${interval.processedBlocks.perSecond.toFixed(2)}
+      ETA: ${formatETA(state.etaSeconds)}
+    `);
+  }
+});
+
+function formatETA(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+}
+```
+
+### Writing to Database
+
+```typescript
+import { progressTracker } from '@subsquid/pipes';
+import { db } from './database';
+
+const tracker = progressTracker({
+  interval: 10000,
+  onProgress: async (progress) => {
+    await db.indexerStatus.upsert({
+      where: { id: 'main' },
+      update: {
+        currentBlock: progress.state.current,
+        percentComplete: progress.state.percent,
+        blocksPerSecond: progress.interval.processedBlocks.perSecond,
+        etaSeconds: progress.state.etaSeconds,
+        updatedAt: new Date()
+      },
+      create: {
+        id: 'main',
+        currentBlock: progress.state.current,
+        percentComplete: progress.state.percent,
+        blocksPerSecond: progress.interval.processedBlocks.perSecond,
+        etaSeconds: progress.state.etaSeconds
+      }
+    });
+  }
+});
+```
+
+### Exposing Metrics API
+
+```typescript
+import express from 'express';
+import { progressTracker, ProgressState } from '@subsquid/pipes';
+
+let latestProgress: ProgressState | null = null;
+
+const tracker = progressTracker({
+  interval: 5000,
+  onProgress: (progress) => {
+    latestProgress = progress;
+  }
+});
+
+// Expose progress via HTTP endpoint
+const app = express();
+app.get('/progress', (req, res) => {
+  if (!latestProgress) {
+    return res.status(503).json({ error: 'Not started yet' });
+  }
+  res.json(latestProgress);
+});
+app.listen(3000);
+```
+
+## Prometheus Metrics Integration
+
+The progress tracker automatically sets Prometheus metrics when used with a metrics server:
+
+```typescript
+import { PortalSource, progressTracker } from '@subsquid/pipes';
+
+const source = new PortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: /* ... */,
+  logger,
+  metrics: prometheusServer({ port: 9090 })
+})
+.pipe(progressTracker({ logger }));
+```
+
+The tracker registers the `sqd_current_block` gauge:
+
+```typescript
+// Inside the transformer start() hook:
+currentBlock = metrics.gauge({
+  name: 'sqd_current_block',
+  help: 'Total number of blocks processed'
+});
+currentBlock.set(-1);
+
+// Updated on each batch:
+currentBlock.set(ctx.state.current.number);
+```
+
+## Performance History
+
+The progress tracker maintains a rolling history to calculate accurate rates:
+
+```typescript
+class ProgressHistory {
+  #options: {
+    maxHistory: 100;        // Keep last 100 state snapshots
+    maxStaleSeconds: 10;    // Reset if no updates for 10 seconds
+  }
+}
+```
+
+### History Validation
+
+If the stream stalls (no updates for `maxStaleSeconds`), the history is reset:
+
+```typescript
+if (Date.now() - lastTimestamp > maxStaleSeconds * 1000) {
+  // Reset history - stream may be stuck
+  this.states = [];
+}
+```
+
+## Access Progress in Context
+
+Progress information is automatically added to the batch context:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes';
+
+const myTransformer = createTransformer({
+  transform: (data, ctx) => {
+    // Access current progress state
+    const progress = ctx.state.progress;
+    
+    if (progress) {
+      console.log(`Processing at ${progress.interval.processedBlocks.perSecond} blocks/sec`);
+      console.log(`${progress.state.percent}% complete`);
+    }
+    
+    return data;
+  }
+});
+
+const source = new PortalSource({ /* ... */ })
+  .pipe(progressTracker({ logger }))
+  .pipe(myTransformer);  // Can access progress in ctx
+```
+
+## Real-World Example: Multi-Stage Indexer
+
+```typescript
+import { PortalSource, progressTracker, createTransformer } from '@subsquid/pipes';
+import { ethereum } from '@subsquid/pipes-ethereum';
+import { db } from './database';
+
+let indexerStats = {
+  startTime: Date.now(),
+  totalBlocks: 0,
+  totalTxs: 0,
+  totalBytes: 0
+};
+
+const tracker = progressTracker({
+  interval: 5000,
+  logger,
+  onStart: (state) => {
+    console.log(`Starting indexer from block ${state.current?.number || state.initial}`);
+    indexerStats.startTime = Date.now();
+  },
+  onProgress: (progress) => {
+    const { state, interval } = progress;
+    
+    // Update cumulative stats
+    indexerStats.totalBlocks += interval.processedBlocks.count;
+    indexerStats.totalBytes += interval.bytesDownloaded.count;
+    
+    // Log detailed progress
+    logger.info({
+      message: `Progress: ${state.percent.toFixed(1)}%`,
+      currentBlock: state.current,
+      blocksPerSec: interval.processedBlocks.perSecond.toFixed(2),
+      mbPerSec: (interval.bytesDownloaded.perSecond / 1024 / 1024).toFixed(2),
+      eta: formatDuration(state.etaSeconds),
+      requestStats: {
+        total: interval.requests.total.count,
+        successful: `${interval.requests.successful.percent.toFixed(1)}%`,
+        rateLimited: `${interval.requests.rateLimited.percent.toFixed(1)}%`,
+        failed: `${interval.requests.failed.percent.toFixed(1)}%`
+      }
+    });
+    
+    // Alert if performance degrades
+    if (interval.processedBlocks.perSecond < 10) {
+      logger.warn('Processing speed is slow! Consider checking Portal status.');
+    }
+    
+    if (interval.requests.failed.percent > 5) {
+      logger.error('High request failure rate! Check network connectivity.');
+    }
+  }
+});
+
+const source = new PortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: ethereum.query()
+    .block({ number: true, timestamp: true })
+    .transaction({ hash: true })
+    .from(18_000_000),
+  logger
+})
+.pipe(tracker)
+.pipe(createTransformer({
+  transform: (data, ctx) => {
+    indexerStats.totalTxs += data.blocks.reduce(
+      (sum, b) => sum + b.transactions.length, 0
+    );
+    return data;
+  }
+}));
+
+for await (const batch of source) {
+  await processData(batch);
+}
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  return `${h}h ${m}m ${s}s`;
+}
+```
+
+## Tips and Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Appropriate Intervals" icon="clock">
+    Use 5-10 second intervals for development, 30-60 seconds for production to reduce logging overhead.
+  </Card>
+  <Card title="Monitor Request Stats" icon="chart-bar">
+    Watch for high rate-limit or failure percentages - they indicate Portal or network issues.
+  </Card>
+  <Card title="ETA Accuracy" icon="hourglass">
+    ETA becomes more accurate after processing several batches as the rolling average stabilizes.
+  </Card>
+  <Card title="Progress Persistence" icon="database">
+    Store progress in a database to show indexing status in dashboards or APIs.
+  </Card>
+</CardGroup>
+
+<Warning>
+  The progress tracker adds minimal overhead, but very short intervals (< 1 second) may impact performance on fast indexers.
+</Warning>
+
+<Tip>
+  Access `ctx.state.progress` in any downstream transformer to make processing decisions based on performance metrics.
+</Tip>

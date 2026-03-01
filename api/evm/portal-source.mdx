@@ -1,0 +1,181 @@
+---
+title: evmPortalSource()
+description: Create a portal source for streaming EVM blockchain data
+---
+
+## Overview
+
+Creates a portal source for streaming EVM blockchain data. This function initializes a connection to a Subsquid portal and returns a source that can be piped through transformers and decoders.
+
+## Signature
+
+```typescript
+function evmPortalSource<F extends evm.FieldSelection = any>({
+  portal,
+  query,
+  cache,
+  logger,
+  metrics,
+  progress,
+}: {
+  portal: string | PortalClientOptions | PortalClient
+  query?: PortalRange | EvmQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+}): PortalSource<EvmQueryBuilder<F>, EvmPortalData<F>>
+```
+
+## Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions | PortalClient" required>
+  Portal connection configuration. Can be:
+  - A string URL to the portal endpoint
+  - A `PortalClientOptions` object with connection settings
+  - An existing `PortalClient` instance
+</ParamField>
+
+<ParamField path="query" type="PortalRange | EvmQueryBuilder<F>">
+  Query configuration for the portal. Can be:
+  - A `PortalRange` object specifying block range (e.g., `{ from: 0, to: 1000000 }`)
+  - An `EvmQueryBuilder` instance with advanced query configuration
+  
+  If not provided, creates a new `EvmQueryBuilder` with default settings.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Optional cache configuration for portal data. Helps reduce redundant data fetching.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level. Can be:
+  - A `Logger` instance for custom logging
+  - A log level string: `'trace'`, `'debug'`, `'info'`, `'warn'`, `'error'`
+  
+  If not provided, creates a default logger.
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Optional metrics server for monitoring portal performance and data throughput.
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Optional progress tracking configuration with the following properties:
+  - `interval`: Number of milliseconds between progress updates
+  - `onStart`: Callback function when processing starts
+  - `onProgress`: Callback function for progress updates
+</ParamField>
+
+## Returns
+
+Returns a `PortalSource<EvmQueryBuilder<F>, EvmPortalData<F>>` that can be piped to transformers and targets.
+
+The returned source provides:
+- `pipe()`: Connect transformers to process the data
+- `pipeTo()`: Connect to a target for final data handling
+
+## Type Definitions
+
+```typescript
+type EvmPortalData<F extends evm.FieldSelection> = { 
+  blocks: evm.Block<F>[] 
+}
+
+type EvmTransformer<In, Out> = Transformer<In, Out, EvmQueryBuilder>
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes'
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: { from: 0 },
+  logger: 'info',
+})
+```
+
+### With Query Builder
+
+```typescript
+import { evmPortalSource, EvmQueryBuilder } from '@subsquid/pipes'
+
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, hash: true, timestamp: true },
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 0, to: 1000000 },
+    request: {
+      address: ['0x...'],
+      topic0: ['0x...'],
+    },
+  })
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query,
+})
+```
+
+### With Progress Tracking
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes'
+
+const source = evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: { from: 0 },
+  logger: 'info',
+  progress: {
+    interval: 5000, // Update every 5 seconds
+    onStart: (ctx) => {
+      console.log('Starting from block:', ctx.cursor.number)
+    },
+    onProgress: (ctx) => {
+      console.log('Processed blocks:', ctx.cursor.number)
+    },
+  },
+})
+```
+
+### Complete Pipeline
+
+```typescript
+import { evmPortalSource, evmDecoder, createTarget } from '@subsquid/pipes'
+import { erc20Abi } from './abi'
+
+await evmPortalSource({
+  portal: 'https://v2.archive.subsquid.io/network/ethereum-mainnet',
+  query: { from: 0 },
+  logger: 'info',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 0 },
+      events: {
+        transfers: erc20Abi.events.Transfer,
+      },
+    })
+  )
+  .pipeTo(
+    createTarget({
+      write: async ({ read }) => {
+        for await (const { data } of read()) {
+          console.log('Transfers:', data.transfers.length)
+        }
+      },
+    })
+  )
+```
+
+## Related
+
+- [evmDecoder()](/api/evm/decoder) - Decode EVM events from portal data
+- [EvmQueryBuilder](/api/evm/query-builder) - Build advanced EVM queries
+- [Factory](/api/evm/factory) - Track dynamically created contracts

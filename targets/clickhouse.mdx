@@ -1,0 +1,504 @@
+---
+title: ClickHouse Target
+description: Store blockchain data in ClickHouse for high-performance analytics
+---
+
+The ClickHouse target writes processed blockchain data to a ClickHouse database, ideal for analytics workloads and time-series data.
+
+## Installation
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install @subsquid/pipes @clickhouse/client
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash
+    pnpm add @subsquid/pipes @clickhouse/client
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash
+    yarn add @subsquid/pipes @clickhouse/client
+    ```
+  </Tab>
+  <Tab title="bun">
+    ```bash
+    bun add @subsquid/pipes @clickhouse/client
+    ```
+  </Tab>
+</Tabs>
+
+## Quick Start
+
+Here's a complete example indexing ERC20 transfers to ClickHouse:
+
+```typescript
+import { createClient } from '@clickhouse/client'
+import { commonAbis, evmDecoder, evmPortalSource } from '@subsquid/pipes/evm'
+import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
+
+const client = createClient({
+  username: 'default',
+  password: 'default',
+  url: 'http://localhost:10123',
+})
+
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 'latest' },
+      events: {
+        transfers: commonAbis.erc20.events.Transfer,
+      },
+    }),
+  )
+  .pipeTo(
+    clickhouseTarget({
+      client,
+      onRollback: async () => {},
+      onData: async ({ data, ctx }) => {
+        const span = ctx.profiler.start('my measure')
+        console.log('batch')
+        console.log(`parsed ${data.transfers.length} transfers`)
+        console.log('----------------------------------')
+        span.end()
+      },
+    }),
+  )
+```
+
+## API Reference
+
+### `clickhouseTarget(options)`
+
+Creates a ClickHouse target for your pipe.
+
+<ParamField path="options" type="object" required>
+  Configuration object for the ClickHouse target
+  
+  <Expandable title="properties">
+    <ParamField path="client" type="ClickHouseClient" required>
+      ClickHouse client instance from `@clickhouse/client`
+    </ParamField>
+    
+    <ParamField path="onData" type="function" required>
+      Callback invoked for each batch of processed data
+      
+      ```typescript
+      async ({ store, data, ctx }: {
+        store: ClickhouseStore
+        data: T
+        ctx: Ctx
+      }) => void
+      ```
+      
+      <Expandable title="parameters">
+        <ParamField path="store" type="ClickhouseStore">
+          Store instance for executing ClickHouse queries
+        </ParamField>
+        <ParamField path="data" type="T">
+          The decoded data from your pipe (e.g., events, transactions)
+        </ParamField>
+        <ParamField path="ctx" type="Ctx">
+          Context object with logger and profiler
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="onStart" type="function">
+      Optional callback invoked once before processing starts
+      
+      ```typescript
+      async ({ store, logger }: {
+        store: ClickhouseStore
+        logger: Logger
+      }) => void
+      ```
+      
+      Use this to create tables or perform initialization.
+    </ParamField>
+    
+    <ParamField path="onRollback" type="function">
+      Callback invoked when a blockchain fork is detected
+      
+      ```typescript
+      async ({ type, store, safeCursor }: {
+        type: 'offset_check' | 'blockchain_fork'
+        store: ClickhouseStore
+        safeCursor: BlockCursor
+      }) => void
+      ```
+      
+      <Expandable title="parameters">
+        <ParamField path="type" type="string">
+          - `'offset_check'`: Initial check when resuming from saved state
+          - `'blockchain_fork'`: Blockchain reorganization detected
+        </ParamField>
+        <ParamField path="store" type="ClickhouseStore">
+          Store instance for executing rollback queries
+        </ParamField>
+        <ParamField path="safeCursor" type="BlockCursor">
+          The last known good block cursor to roll back to
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="settings" type="Settings">
+      Optional state management configuration
+      
+      <Expandable title="properties">
+        <ParamField path="database" type="string" default="default">
+          Name of the ClickHouse database to use
+        </ParamField>
+        <ParamField path="table" type="string">
+          Name of the table to store offset data
+        </ParamField>
+        <ParamField path="id" type="string" default="stream">
+          Stream identifier used to isolate offset records
+        </ParamField>
+        <ParamField path="maxRows" type="number" default="10000">
+          Maximum number of offset rows to retain per stream ID
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Complete Example
+
+### 1. Create ClickHouse Tables
+
+First, create your schema in ClickHouse:
+
+```sql
+CREATE TABLE IF NOT EXISTS transfers (
+  block_number UInt32,
+  log_index UInt32,
+  transaction_index UInt32,
+  from_address String,
+  to_address String,
+  amount UInt256,
+  timestamp DateTime
+) ENGINE = MergeTree()
+ORDER BY (block_number, transaction_index, log_index);
+```
+
+### 2. Implement the Target
+
+```typescript
+import { createClient } from '@clickhouse/client'
+import { commonAbis, evmDecoder, evmPortalSource } from '@subsquid/pipes/evm'
+import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
+
+const client = createClient({
+  url: process.env.CLICKHOUSE_URL || 'http://localhost:10123',
+  username: process.env.CLICKHOUSE_USER || 'default',
+  password: process.env.CLICKHOUSE_PASSWORD || 'default',
+})
+
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 0 },
+      events: {
+        transfers: commonAbis.erc20.events.Transfer,
+      },
+    }),
+  )
+  .pipeTo(
+    clickhouseTarget({
+      client,
+      settings: {
+        database: 'default',
+        table: 'indexer_state',
+        id: 'erc20-transfers',
+      },
+      onStart: async ({ store, logger }) => {
+        logger.info('Starting ClickHouse indexer...')
+        // Tables should already exist, but you can create them here if needed
+      },
+      onData: async ({ store, data, ctx }) => {
+        if (data.transfers.length === 0) return
+        
+        const rows = data.transfers.map((transfer) => ({
+          block_number: transfer.block.number,
+          log_index: transfer.rawEvent.logIndex,
+          transaction_index: transfer.rawEvent.transactionIndex,
+          from_address: transfer.event.from,
+          to_address: transfer.event.to,
+          amount: transfer.event.value.toString(),
+          timestamp: new Date(transfer.timestamp.getTime()),
+        }))
+        
+        await store.client.insert({
+          table: 'transfers',
+          values: rows,
+          format: 'JSONEachRow',
+        })
+        
+        ctx.logger.info(`Inserted ${rows.length} transfers`)
+      },
+      onRollback: async ({ type, store, safeCursor }) => {
+        if (type === 'blockchain_fork') {
+          // Delete data from forked blocks
+          await store.client.command({
+            query: `DELETE FROM transfers WHERE block_number > ${safeCursor.number}`,
+          })
+        }
+      },
+    }),
+  )
+```
+
+## Using ClickhouseStore
+
+The `store` object provides access to the underlying ClickHouse client:
+
+```typescript
+onData: async ({ store, data }) => {
+  // Direct client access
+  await store.client.insert({
+    table: 'my_table',
+    values: data,
+    format: 'JSONEachRow',
+  })
+  
+  // Execute queries
+  const result = await store.client.query({
+    query: 'SELECT count() FROM my_table',
+    format: 'JSONEachRow',
+  })
+  
+  // Use commands
+  await store.client.command({
+    query: 'OPTIMIZE TABLE my_table',
+  })
+}
+```
+
+## Performance Optimization
+
+### Batch Inserts
+
+Always insert data in batches for better performance:
+
+```typescript
+onData: async ({ store, data }) => {
+  const rows = data.events.map(event => ({
+    // ... map event to row
+  }))
+  
+  // Insert all rows at once
+  await store.client.insert({
+    table: 'events',
+    values: rows,
+    format: 'JSONEachRow',
+  })
+}
+```
+
+### Use Appropriate Engines
+
+<AccordionGroup>
+  <Accordion title="MergeTree (recommended)">
+    Best for most use cases. Supports efficient queries and automatic data merging.
+    
+    ```sql
+    ENGINE = MergeTree()
+    ORDER BY (block_number, transaction_index)
+    ```
+  </Accordion>
+  
+  <Accordion title="ReplacingMergeTree">
+    Automatically deduplicates rows with the same ORDER BY key.
+    
+    ```sql
+    ENGINE = ReplacingMergeTree()
+    ORDER BY (block_number, transaction_hash, log_index)
+    ```
+  </Accordion>
+  
+  <Accordion title="AggregatingMergeTree">
+    Pre-aggregates data during merges for faster queries.
+    
+    ```sql
+    ENGINE = AggregatingMergeTree()
+    ORDER BY (date, contract_address)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Optimize ORDER BY
+
+Choose ORDER BY columns based on your query patterns:
+
+```sql
+-- Good for time-series queries
+ORDER BY (block_number, transaction_index, log_index)
+
+-- Good for contract-specific queries  
+ORDER BY (contract_address, block_number)
+
+-- Good for address-specific queries
+ORDER BY (from_address, block_number)
+```
+
+## State Management
+
+The ClickHouse target automatically manages indexer state in a dedicated table:
+
+```typescript
+clickhouseTarget({
+  client,
+  settings: {
+    database: 'default',
+    table: 'sqd_indexer_state', // State table name
+    id: 'my-indexer',          // Unique indexer ID
+    maxRows: 10000,             // Keep last 10k state snapshots
+  },
+  // ...
+})
+```
+
+<Warning>
+Do not modify the state table manually. It's managed automatically by the target.
+</Warning>
+
+## Rollback Implementation
+
+Implement the `onRollback` callback to handle blockchain forks:
+
+```typescript
+onRollback: async ({ type, store, safeCursor }) => {
+  if (type === 'blockchain_fork') {
+    // Delete all data after the safe block
+    await store.client.command({
+      query: `
+        DELETE FROM transfers 
+        WHERE block_number > ${safeCursor.number}
+      `,
+    })
+    
+    // If you have multiple tables, delete from all of them
+    await store.client.command({
+      query: `
+        DELETE FROM balances 
+        WHERE block_number > ${safeCursor.number}
+      `,
+    })
+  }
+}
+```
+
+<Note>
+ClickHouse deletes are eventually consistent. Consider using `ALTER TABLE ... DELETE` for immediate consistency if needed.
+</Note>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Include block_number in all tables">
+    Always store `block_number` to enable efficient rollbacks:
+    
+    ```sql
+    CREATE TABLE my_table (
+      block_number UInt32,
+      -- other columns
+    ) ENGINE = MergeTree()
+    ORDER BY (block_number, ...)
+    ```
+  </Accordion>
+  
+  <Accordion title="Use async inserts for high throughput">
+    Enable async inserts in ClickHouse settings for better performance:
+    
+    ```typescript
+    const client = createClient({
+      url: 'http://localhost:10123',
+      clickhouse_settings: {
+        async_insert: 1,
+        wait_for_async_insert: 0,
+      },
+    })
+    ```
+  </Accordion>
+  
+  <Accordion title="Monitor insertion performance">
+    Use the built-in profiler to track performance:
+    
+    ```typescript
+    onData: async ({ store, data, ctx }) => {
+      const span = ctx.profiler.start('insert transfers')
+      
+      await store.client.insert({
+        table: 'transfers',
+        values: rows,
+      })
+      
+      span.end()
+      ctx.logger.info(`Inserted ${rows.length} rows in ${span.duration}ms`)
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle BigInt serialization">
+    ClickHouse supports large numbers. Use UInt256 for blockchain amounts:
+    
+    ```typescript
+    const rows = data.transfers.map(t => ({
+      amount: t.event.value.toString(), // Convert BigInt to string
+      // ClickHouse will parse it as UInt256
+    }))
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection refused">
+    Ensure ClickHouse is running and accessible:
+    
+    ```bash
+    # Check if ClickHouse is running
+    curl http://localhost:10123/ping
+    
+    # Should return "Ok."
+    ```
+  </Accordion>
+  
+  <Accordion title="Table doesn't exist">
+    Create tables before running the indexer. The target won't auto-create data tables (only state tables).
+  </Accordion>
+  
+  <Accordion title="Insert performance is slow">
+    - Enable async inserts
+    - Increase batch size
+    - Check ORDER BY key cardinality
+    - Monitor ClickHouse resource usage
+  </Accordion>
+  
+  <Accordion title="State table errors">
+    The target creates the state table automatically. If you see errors:
+    - Ensure the database exists
+    - Check user permissions (INSERT, CREATE TABLE)
+    - Verify the `settings.table` name doesn't conflict
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Drizzle Target" icon="elephant" href="/targets/drizzle">
+    Learn about the PostgreSQL target with automatic rollbacks
+  </Card>
+  <Card title="Custom Target" icon="wrench" href="/targets/custom">
+    Build your own target implementation
+  </Card>
+</CardGroup>

@@ -1,0 +1,398 @@
+---
+title: EVM Query Builder
+description: Build custom EVM data queries for advanced use cases
+---
+
+## Overview
+
+The `EvmQueryBuilder` provides a fluent API for constructing complex blockchain data queries. While most use cases are covered by `evmDecoder`, the query builder offers fine-grained control over data selection and filtering.
+
+## Basic Usage
+
+The query builder is typically used internally by `evmDecoder`, but you can use it directly for advanced scenarios:
+
+```typescript
+import { EvmQueryBuilder } from '@subsquid/pipes/evm'
+
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    log: { topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 1000000, to: 2000000 },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+    },
+  })
+```
+
+## API Reference
+
+### Type Signature
+
+```typescript evm-query-builder.ts:7-10
+class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBuilder<F, evm.DataRequest> {
+  getType() {
+    return 'evm'
+  }
+```
+
+### Methods
+
+#### addFields
+
+Specify which fields to include in the response:
+
+```typescript evm-query-builder.ts:12-16
+addFields<T extends Subset<T, evm.FieldSelection>>(fields: T): EvmQueryBuilder<F & T> {
+  this.fields = mergeDeep(this.fields, fields)
+
+  return this as unknown as EvmQueryBuilder<F & T>
+}
+```
+
+**Parameters:**
+- `fields`: Object specifying which fields to include from blocks, logs, transactions, and traces
+
+**Returns:** Updated query builder with merged field selection
+
+#### addLog
+
+Add a log (event) query:
+
+```typescript evm-query-builder.ts:28-30
+addLog(options: RequestOptions<evm.LogRequest>): this {
+  return this.addRequest('logs', options)
+}
+```
+
+**Parameters:**
+- `options.range`: Block range for the query
+- `options.request`: Log filter criteria
+  - `address`: Contract address(es)
+  - `topic0`, `topic1`, `topic2`, `topic3`: Event topic filters
+  - `transaction`: Include transaction data
+
+#### addTransaction
+
+Add a transaction query:
+
+```typescript evm-query-builder.ts:32-34
+addTransaction(options: RequestOptions<evm.TransactionRequest>): this {
+  return this.addRequest('transactions', options)
+}
+```
+
+**Parameters:**
+- `options.range`: Block range
+- `options.request`: Transaction filter criteria
+  - `from`: Sender address(es)
+  - `to`: Recipient address(es)
+  - `sighash`: Function signature hash(es)
+
+#### addTrace
+
+Add a trace query:
+
+```typescript evm-query-builder.ts:36-38
+addTrace(options: RequestOptions<evm.TraceRequest>): this {
+  return this.addRequest('traces', options)
+}
+```
+
+**Parameters:**
+- `options.range`: Block range
+- `options.request`: Trace filter criteria
+  - `type`: Trace type (call, create, suicide, reward)
+  - `from`: Caller address(es)
+  - `to`: Callee address(es)
+
+#### addStateDiff
+
+Add a state diff query:
+
+```typescript evm-query-builder.ts:40-42
+addStateDiff(options: RequestOptions<evm.StateDiffRequest>): this {
+  return this.addRequest('stateDiffs', options)
+}
+```
+
+**Parameters:**
+- `options.range`: Block range
+- `options.request`: State diff filter criteria
+  - `address`: Contract address(es)
+  - `key`: Storage key(s)
+
+## Examples
+
+### Querying Logs
+
+Query ERC20 Transfer events:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true, hash: true },
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 'latest' },
+    request: {
+      // USDC contract
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+      // Transfer event signature
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'],
+      transaction: true,
+    },
+  })
+```
+
+### Querying Transactions
+
+Query transactions to a specific contract:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    transaction: { from: true, to: true, hash: true, input: true },
+  })
+  .addTransaction({
+    range: { from: 1000000, to: 2000000 },
+    request: {
+      to: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+```
+
+### Querying Traces
+
+Query internal calls:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true },
+    trace: { from: true, to: true, value: true, input: true },
+  })
+  .addTrace({
+    range: { from: 'latest' },
+    request: {
+      type: ['call'],
+      to: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+```
+
+### Multiple Ranges
+
+Query different ranges for different event types:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    log: { address: true, topics: true, data: true },
+  })
+  .addLog({
+    range: { from: 1000000, to: 1500000 },
+    request: {
+      topic0: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'], // Transfer
+    },
+  })
+  .addLog({
+    range: { from: 1500000, to: 2000000 },
+    request: {
+      topic0: ['0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925'], // Approval
+    },
+  })
+```
+
+### With Portal Source
+
+Use a custom query builder with `evmPortalSource`:
+
+```typescript
+import { evmPortalSource, EvmQueryBuilder } from '@subsquid/pipes/evm'
+
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true, timestamp: true },
+    log: { topics: true, data: true, address: true },
+  })
+  .addLog({
+    range: { from: 'latest' },
+    request: {
+      address: ['0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'],
+    },
+  })
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  query,
+})
+
+for await (const { data } of stream) {
+  console.log(`Received ${data.blocks.length} blocks`)
+  for (const block of data.blocks) {
+    console.log(`Block ${block.header.number}: ${block.logs?.length || 0} logs`)
+  }
+}
+```
+
+## Field Selection
+
+### Available Fields
+
+The field selection follows this structure:
+
+```typescript
+type FieldSelection = {
+  block?: {
+    number?: boolean
+    hash?: boolean
+    parentHash?: boolean
+    timestamp?: boolean
+    size?: boolean
+    gasUsed?: boolean
+    gasLimit?: boolean
+    baseFeePerGas?: boolean
+    // ... and more
+  }
+  log?: {
+    address?: boolean
+    topics?: boolean
+    data?: boolean
+    transactionHash?: boolean
+    logIndex?: boolean
+    transactionIndex?: boolean
+    removed?: boolean
+  }
+  transaction?: {
+    from?: boolean
+    to?: boolean
+    hash?: boolean
+    input?: boolean
+    value?: boolean
+    gas?: boolean
+    gasPrice?: boolean
+    nonce?: boolean
+    // ... and more
+  }
+  trace?: {
+    from?: boolean
+    to?: boolean
+    value?: boolean
+    input?: boolean
+    output?: boolean
+    type?: boolean
+    // ... and more
+  }
+}
+```
+
+### Minimal Fields
+
+Request only the fields you need to reduce data transfer:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: { number: true }, // Only block number
+    log: { topics: true, data: true }, // Only topics and data
+  })
+  .addLog({
+    range: { from: 'latest' },
+    request: { topic0: ['0x...'] },
+  })
+```
+
+### All Fields
+
+Request all available fields:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addFields({
+    block: {
+      number: true,
+      hash: true,
+      parentHash: true,
+      timestamp: true,
+      size: true,
+      gasUsed: true,
+      gasLimit: true,
+      baseFeePerGas: true,
+    },
+    log: {
+      address: true,
+      topics: true,
+      data: true,
+      transactionHash: true,
+      logIndex: true,
+      transactionIndex: true,
+    },
+    transaction: {
+      from: true,
+      to: true,
+      hash: true,
+      input: true,
+      value: true,
+      gas: true,
+      gasPrice: true,
+    },
+  })
+```
+
+## Request Merging
+
+The query builder automatically merges multiple requests:
+
+```typescript evm-query-builder.ts:44-56
+mergeDataRequests(...requests: evm.DataRequest[]): evm.DataRequest {
+  let res: evm.DataRequest = {}
+  for (let req of requests) {
+    res.transactions = concatQueryLists(res.transactions, req.transactions)
+    res.logs = concatQueryLists(res.logs, req.logs)
+    res.traces = concatQueryLists(res.traces, req.traces)
+    res.stateDiffs = concatQueryLists(res.stateDiffs, req.stateDiffs)
+    if (res.includeAllBlocks || req.includeAllBlocks) {
+      res.includeAllBlocks = true
+    }
+  }
+  return res
+}
+```
+
+This allows you to build complex queries incrementally:
+
+```typescript
+const query = new EvmQueryBuilder()
+  .addLog({ range: { from: 0, to: 1000000 }, request: { topic0: ['0x...'] } })
+  .addLog({ range: { from: 1000000, to: 2000000 }, request: { topic0: ['0x...'] } })
+  .addTransaction({ range: { from: 0, to: 2000000 }, request: { to: ['0x...'] } })
+```
+
+## When to Use Query Builder
+
+Use `EvmQueryBuilder` directly when:
+
+- You need to query transactions, traces, or state diffs (not just logs)
+- You need different field selections for different queries
+- You want explicit control over request merging
+- You're building a custom transformer that doesn't fit the `evmDecoder` pattern
+
+For most event decoding use cases, use `evmDecoder` instead, which uses the query builder internally.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Portal Source" icon="arrow-right" href="/evm/portal-source">
+    Learn about EVM portal sources
+  </Card>
+  <Card title="Event Decoder" icon="arrow-right" href="/evm/decoder">
+    Decode events with evmDecoder
+  </Card>
+</CardGroup>

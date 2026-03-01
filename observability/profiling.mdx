@@ -1,0 +1,306 @@
+---
+title: Profiling
+description: Performance profiling and tracing in Subsquid Pipes
+---
+
+Subsquid Pipes includes a built-in profiling system for measuring execution time and tracking performance bottlenecks in your data processing pipeline.
+
+## Profiler Interface
+
+The `Profiler` interface provides methods for creating execution spans and measuring performance:
+
+```typescript
+interface Profiler {
+  name: string
+  elapsed: number
+  children: Profiler[]
+  data?: any
+
+  start(name: string): Profiler
+  measure<T>(name: string, fn: (span: Profiler) => Promise<T>): Promise<T>
+  addLabels(labels: string | string[]): Profiler
+  end(): Profiler
+  addTransformerExemplar(dataExample: any): Profiler
+  transform<T>(transformer: (span: Span, level: number) => T, level?: number): T[]
+}
+```
+
+## Enabling Profiling
+
+Enable profiling in the portal source configuration:
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  profiler: true, // Enable profiling
+})
+```
+
+## Accessing the Profiler
+
+The profiler is available in the batch context:
+
+```typescript
+for await (const { data, ctx } of stream) {
+  const profiler = ctx.profiler
+  
+  // Start a new span
+  const span = profiler.start('process-batch')
+  
+  // ... do work ...
+  
+  span.end()
+}
+```
+
+## Creating Spans
+
+### Manual Spans
+
+Create and end spans manually:
+
+```typescript
+const span = profiler.start('database-write')
+
+try {
+  await db.insert(records)
+} finally {
+  span.end()
+}
+
+console.log(`Database write took ${span.elapsed.toFixed(2)}ms`)
+```
+
+### Measured Spans
+
+Use `measure()` for automatic span management:
+
+```typescript
+const result = await profiler.measure('decode-events', async (span) => {
+  // Add labels for categorization
+  span.addLabels(['evm', 'decoder'])
+  
+  const decoded = decodeEvents(rawData)
+  
+  // Add example data for debugging
+  span.addTransformerExemplar(decoded[0])
+  
+  return decoded
+})
+```
+
+## Nested Spans
+
+Create hierarchical spans to track nested operations:
+
+```typescript
+for await (const { data, ctx } of stream) {
+  const batchSpan = ctx.profiler.start('process-batch')
+  
+  const decodeSpan = batchSpan.start('decode')
+  const decoded = await decode(data)
+  decodeSpan.end()
+  
+  const transformSpan = batchSpan.start('transform')
+  const transformed = await transform(decoded)
+  transformSpan.end()
+  
+  const saveSpan = batchSpan.start('save')
+  await save(transformed)
+  saveSpan.end()
+  
+  batchSpan.end()
+  
+  // Print hierarchical timing
+  console.log(batchSpan.toString())
+}
+```
+
+Output:
+
+```
+[process-batch] 1234.56ms
+ [decode] 234.12ms
+ [transform] 456.78ms
+ [save] 543.66ms
+```
+
+## Adding Labels
+
+Labels help categorize and filter spans:
+
+```typescript
+const span = profiler.start('fetch-data')
+  .addLabels('network')
+  .addLabels(['ethereum', 'mainnet'])
+
+// ... perform work ...
+
+span.end()
+```
+
+## Adding Data Exemplars
+
+Store sample data with transformer spans for debugging:
+
+```typescript
+const span = profiler.start('transform-events')
+
+const events = rawEvents.map(transform)
+
+// Store first event as example
+span.addTransformerExemplar(events[0])
+
+span.end()
+```
+
+**Data packing:**
+- Arrays with ≤10 primitive values are stored as-is
+- Larger arrays are truncated to first element + count
+- Objects are recursively packed
+- Dates are preserved
+
+## Transforming Spans
+
+Extract custom data from the span tree:
+
+```typescript
+const timings = profiler.transform((span, level) => ({
+  name: span.name,
+  elapsed: span.elapsed,
+  depth: level,
+}))
+
+console.table(timings)
+```
+
+Output:
+
+```
+┌───┬─────────────────┬──────────┬───────┐
+│   │ name            │ elapsed  │ depth │
+├───┼─────────────────┼──────────┼───────┤
+│ 0 │ process-batch   │ 1234.56  │ 0     │
+│ 1 │ decode          │ 234.12   │ 1     │
+│ 2 │ transform       │ 456.78   │ 1     │
+│ 3 │ save            │ 543.66   │ 1     │
+└───┴─────────────────┴──────────┴───────┘
+```
+
+## Profiler Implementation
+
+### Span Class
+
+The active profiler when enabled:
+
+```typescript
+class Span implements Profiler {
+  children: Span[] = []
+  elapsed = 0
+  started = 0
+  labels: string[] = []
+  data?: any
+
+  static root(name: string, enabled: boolean): Profiler {
+    if (!enabled) return new DummyProfiler()
+    return new Span(name)
+  }
+
+  start(name: string): Profiler
+  measure<T>(name: string, fn: (span: Profiler) => Promise<T>): Promise<T>
+  addLabels(labels: string | string[]): Profiler
+  end(): Profiler
+  addTransformerExemplar(data: any): Profiler
+  transform<T>(transformer: (span: Span, level: number) => T, level?: number): T[]
+}
+```
+
+### DummyProfiler
+
+When profiling is disabled, a no-op profiler is used:
+
+```typescript
+class DummyProfiler implements Profiler {
+  name = ''
+  elapsed = 0
+  children = []
+
+  start(name: string): Profiler { return this }
+  measure<T>(name: string, fn: (span: Profiler) => Promise<T>): Promise<T> {
+    return fn(this)
+  }
+  addLabels(labels: string | string[]): Profiler { return this }
+  end(): Profiler { return this }
+  addTransformerExemplar(): Profiler { return this }
+  transform<T>(): T[] { return [] }
+}
+```
+
+## Performance Considerations
+
+<Note>
+Profiling adds minimal overhead when disabled. The `DummyProfiler` ensures zero-cost abstraction for production environments.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="When to enable profiling">
+    - During development to identify bottlenecks
+    - When debugging performance issues
+    - For one-time performance audits
+    
+    Disable in production unless actively debugging.
+  </Accordion>
+
+  <Accordion title="Span granularity">
+    Create spans for operations that:
+    - Take significant time (>10ms)
+    - Are potential bottlenecks
+    - Need performance tracking
+    
+    Avoid creating spans for trivial operations.
+  </Accordion>
+
+  <Accordion title="Data exemplars">
+    Only store exemplars for debugging:
+    - Limit to small, representative samples
+    - Avoid large objects or arrays
+    - Use only when needed for troubleshooting
+  </Accordion>
+</AccordionGroup>
+
+## Example: Full Pipeline Profiling
+
+```typescript
+import { evmPortalSource, evmDecoder } from '@subsquid/pipes/evm'
+import { commonAbis } from '@subsquid/pipes/evm'
+
+const stream = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  profiler: true,
+}).pipe(
+  evmDecoder({
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+    },
+  }),
+)
+
+for await (const { data, ctx } of stream) {
+  await ctx.profiler.measure('process-transfers', async (span) => {
+    span.addLabels('erc20')
+    
+    await ctx.profiler.measure('save-to-db', async () => {
+      await db.insert(data.transfers)
+    })
+    
+    await ctx.profiler.measure('update-cache', async () => {
+      await cache.set('latest', data.transfers[0])
+    })
+  })
+  
+  // Print timing tree
+  console.log(ctx.profiler.toString())
+}
+```

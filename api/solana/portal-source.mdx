@@ -1,0 +1,162 @@
+---
+title: 'solanaPortalSource()'
+description: 'Creates a data source for Solana blockchain data from a Portal endpoint'
+---
+
+## Overview
+
+Creates a `PortalSource` instance configured for Solana blockchain data ingestion. This function sets up a stream that fetches blocks from a Portal endpoint and normalizes the data according to the specified field selection.
+
+## Function Signature
+
+```typescript
+function solanaPortalSource<F extends solana.FieldSelection = any>(options: {
+  portal: string | PortalClientOptions
+  query?: PortalRange | SolanaQueryBuilder<F>
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  progress?: ProgressTrackerOptions
+}): PortalSource<SolanaQueryBuilder<F>, SolanaPortalData<F>>
+```
+
+## Parameters
+
+<ParamField path="portal" type="string | PortalClientOptions" required>
+  The Portal endpoint URL or configuration object. This specifies where to fetch Solana blockchain data from.
+  
+  **Example:** `"https://portal.sqd.dev/datasets/solana-mainnet"`
+</ParamField>
+
+<ParamField path="query" type="PortalRange | SolanaQueryBuilder<F>">
+  Defines the data query configuration. Can be either:
+  - A `PortalRange` object specifying block range (e.g., `{ from: 0, to: 1000 }`)
+  - A `SolanaQueryBuilder` instance for more complex queries
+  
+  If not provided, creates a new empty `SolanaQueryBuilder`.
+</ParamField>
+
+<ParamField path="cache" type="PortalCache">
+  Optional caching configuration to optimize data fetching and reduce redundant requests.
+</ParamField>
+
+<ParamField path="logger" type="Logger | LogLevel">
+  Logger instance or log level string. Supported levels: `"debug"`, `"info"`, `"warn"`, `"error"`.
+  
+  If a string is provided, a default logger will be created with that level.
+</ParamField>
+
+<ParamField path="metrics" type="MetricsServer">
+  Optional Prometheus metrics server for monitoring pipeline performance.
+</ParamField>
+
+<ParamField path="progress" type="ProgressTrackerOptions">
+  Configuration for tracking and reporting progress during data ingestion.
+  
+  **Properties:**
+  - `interval?: number` - Progress update interval in milliseconds
+  - `onStart?: () => void` - Callback when processing starts
+  - `onProgress?: (info: ProgressInfo) => void` - Callback for progress updates
+</ParamField>
+
+## Return Value
+
+Returns a `PortalSource<SolanaQueryBuilder<F>, SolanaPortalData<F>>` instance that can be used in a data pipeline.
+
+**Type Definitions:**
+```typescript
+type SolanaPortalData<F extends solana.FieldSelection> = { 
+  blocks: solana.Block<F>[] 
+}
+
+type SolanaTransformer<In, Out> = Transformer<In, Out, SolanaQueryBuilder>
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { solanaPortalSource } from '@subsquid/pipes/solana'
+
+const source = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 0, to: 1000 }
+})
+
+for await (const { data } of source) {
+  console.log(`Processed ${data.blocks.length} blocks`)
+}
+```
+
+### With Query Builder
+
+```typescript
+import { solanaPortalSource, SolanaQueryBuilder } from '@subsquid/pipes/solana'
+
+const query = new SolanaQueryBuilder()
+  .addInstruction({
+    range: { from: 371602677 },
+    request: {
+      programId: ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'],
+      isCommitted: true,
+      transaction: true
+    }
+  })
+  .addFields({
+    block: { number: true, timestamp: true },
+    instruction: { programId: true, data: true }
+  })
+
+const source = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query,
+  logger: 'info'
+})
+```
+
+### With Progress Tracking
+
+```typescript
+import { solanaPortalSource } from '@subsquid/pipes/solana'
+
+const source = solanaPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+  query: { from: 0 },
+  logger: 'info',
+  progress: {
+    interval: 5000,
+    onStart: () => console.log('Processing started'),
+    onProgress: (info) => {
+      console.log(`Progress: ${info.currentBlock}/${info.targetBlock}`)
+    }
+  }
+})
+```
+
+## Related Types
+
+### PortalRange
+
+```typescript
+type PortalRange = {
+  from?: number | string | 'latest'
+  to?: number | string
+}
+```
+
+Defines a range of blocks to fetch:
+- `from`: Starting block number (supports formatted strings like `"1,000,000"` or `"1_000_000"`)
+- `to`: Ending block number (optional, supports relative offsets like `"+1000"`)
+- Use `'latest'` for the most recent block
+
+## Notes
+
+- The source automatically normalizes and validates data according to the Solana block schema
+- Data is fetched in batches for optimal performance
+- The returned source can be piped through transformers for further processing
+- Field selection is type-safe and affects the shape of returned data
+
+## Deprecated
+
+`createSolanaPortalSource` is deprecated. Use `solanaPortalSource` instead.

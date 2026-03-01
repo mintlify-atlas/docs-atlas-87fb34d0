@@ -1,0 +1,641 @@
+---
+title: Custom Targets
+description: Build your own target implementation for Subsquid Pipes
+---
+
+Create custom targets to store processed blockchain data in any database or storage system.
+
+## When to Build a Custom Target
+
+Consider building a custom target when:
+
+- You need to store data in a database not covered by built-in targets
+- You have specific state management requirements
+- You want custom rollback behavior
+- You need to integrate with existing infrastructure
+- You want to write data to multiple destinations
+
+## Target Interface
+
+All targets implement the `Target<In>` interface:
+
+```typescript
+import { Target, createTarget, BlockCursor, Logger } from '@subsquid/pipes/core'
+
+type Target<In> = {
+  write: (writer: {
+    read: (cursor?: BlockCursor) => AsyncIterableIterator<PortalBatch<In>>
+    logger: Logger
+  }) => Promise<void>
+  fork?: (previousBlocks: BlockCursor[]) => Promise<BlockCursor | null>
+}
+```
+
+### Core Types
+
+<ParamField path="BlockCursor" type="object">
+  Represents a position in the blockchain
+  
+  ```typescript
+  type BlockCursor = {
+    number: number    // Block number
+    hash: string      // Block hash
+  }
+  ```
+</ParamField>
+
+<ParamField path="PortalBatch<In>" type="object">
+  A batch of processed data from the pipe
+  
+  ```typescript
+  type PortalBatch<In> = {
+    data: In          // Your processed data
+    ctx: Ctx          // Context with state, profiler, logger
+  }
+  ```
+</ParamField>
+
+<ParamField path="Logger" type="object">
+  Logger instance for debugging
+  
+  ```typescript
+  type Logger = {
+    debug: (message: string) => void
+    info: (message: string) => void
+    warn: (message: string) => void
+    error: (message: string) => void
+  }
+  ```
+</ParamField>
+
+## Creating a Target
+
+Use the `createTarget` helper to implement the interface:
+
+```typescript
+import { createTarget, type BlockCursor } from '@subsquid/pipes/core'
+
+export function myCustomTarget<T>(options: {
+  // Your configuration options
+  onData: (data: T) => Promise<void>
+}) {
+  return createTarget<T>({
+    write: async ({ read, logger }) => {
+      let cursor: BlockCursor | undefined
+      
+      // 1. Load saved state (if any)
+      cursor = await loadSavedState()
+      
+      // 2. Process batches
+      for await (const { data, ctx } of read(cursor)) {
+        // 3. Write data
+        await options.onData(data)
+        
+        // 4. Save state
+        await saveState(ctx.state.current)
+      }
+    },
+    fork: async (previousBlocks) => {
+      // Optional: Handle blockchain reorganizations
+      // Return the block to resume from, or null to start over
+      return previousBlocks[0] || null
+    },
+  })
+}
+```
+
+## Example: MongoDB Target
+
+Here's a complete example of a MongoDB target:
+
+```typescript
+import { MongoClient, Collection, Db } from 'mongodb'
+import { createTarget, type BlockCursor, type Logger, type Ctx } from '@subsquid/pipes/core'
+
+type MongoTargetOptions<T> = {
+  url: string
+  database: string
+  collection: string
+  onData: (ctx: {
+    db: Db
+    collection: Collection
+    data: T
+    ctx: Ctx
+  }) => Promise<void>
+  onRollback?: (ctx: {
+    db: Db
+    collection: Collection
+    safeCursor: BlockCursor
+  }) => Promise<void>
+}
+
+export function mongoTarget<T>(options: MongoTargetOptions<T>) {
+  let client: MongoClient
+  let db: Db
+  let collection: Collection
+  let stateCollection: Collection
+  
+  return createTarget<T>({
+    write: async ({ read, logger }) => {
+      // Connect to MongoDB
+      client = new MongoClient(options.url)
+      await client.connect()
+      
+      db = client.db(options.database)
+      collection = db.collection(options.collection)
+      stateCollection = db.collection('_sqd_state')
+      
+      logger.info('Connected to MongoDB')
+      
+      // Load saved state
+      const state = await stateCollection.findOne({ _id: 'cursor' })
+      const cursor: BlockCursor | undefined = state?.cursor
+      
+      if (cursor) {
+        logger.info(`Resuming from block ${cursor.number}`)
+      }
+      
+      // Process batches
+      for await (const { data, ctx } of read(cursor)) {
+        await ctx.profiler.measure('mongo insert', async () => {
+          // Call user's data handler
+          await options.onData({
+            db,
+            collection,
+            data,
+            ctx,
+          })
+        })
+        
+        // Save state
+        await ctx.profiler.measure('mongo state save', async () => {
+          await stateCollection.updateOne(
+            { _id: 'cursor' },
+            { $set: { cursor: ctx.state.current } },
+            { upsert: true },
+          )
+        })
+        
+        logger.debug(`Processed block ${ctx.state.current.number}`)
+      }
+      
+      // Cleanup
+      await client.close()
+    },
+    fork: async (previousBlocks) => {
+      // Find the most recent valid block
+      const safeCursor = previousBlocks[0]
+      if (!safeCursor) return null
+      
+      logger.warn(`Fork detected! Rolling back to block ${safeCursor.number}`)
+      
+      // Call user's rollback handler
+      if (options.onRollback) {
+        await options.onRollback({
+          db,
+          collection,
+          safeCursor,
+        })
+      } else {
+        // Default: delete all documents after the safe block
+        await collection.deleteMany({
+          blockNumber: { $gt: safeCursor.number },
+        })
+      }
+      
+      return safeCursor
+    },
+  })
+}
+```
+
+### Using the MongoDB Target
+
+```typescript
+import { evmPortalSource, evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+import { mongoTarget } from './mongo-target'
+
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      events: {
+        transfers: commonAbis.erc20.events.Transfer,
+      },
+    }),
+  )
+  .pipeTo(
+    mongoTarget({
+      url: 'mongodb://localhost:27017',
+      database: 'blockchain',
+      collection: 'transfers',
+      onData: async ({ collection, data, ctx }) => {
+        const documents = data.transfers.map(t => ({
+          blockNumber: t.block.number,
+          logIndex: t.rawEvent.logIndex,
+          from: t.event.from,
+          to: t.event.to,
+          amount: t.event.value.toString(),
+          timestamp: t.timestamp,
+        }))
+        
+        await collection.insertMany(documents)
+        ctx.logger.info(`Inserted ${documents.length} transfers`)
+      },
+      onRollback: async ({ collection, safeCursor }) => {
+        // Custom rollback: delete documents from forked blocks
+        const result = await collection.deleteMany({
+          blockNumber: { $gt: safeCursor.number },
+        })
+        console.log(`Deleted ${result.deletedCount} documents`)
+      },
+    }),
+  )
+```
+
+## Example: Redis Target
+
+A simpler example using Redis for caching:
+
+```typescript
+import { createClient, RedisClientType } from 'redis'
+import { createTarget, type BlockCursor } from '@subsquid/pipes/core'
+
+type RedisTargetOptions<T> = {
+  url: string
+  onData: (ctx: {
+    client: RedisClientType
+    data: T
+  }) => Promise<void>
+}
+
+export function redisTarget<T>(options: RedisTargetOptions<T>) {
+  let client: RedisClientType
+  
+  return createTarget<T>({
+    write: async ({ read, logger }) => {
+      // Connect to Redis
+      client = createClient({ url: options.url })
+      await client.connect()
+      logger.info('Connected to Redis')
+      
+      // Load saved cursor
+      const savedCursor = await client.get('sqd:cursor')
+      const cursor: BlockCursor | undefined = savedCursor
+        ? JSON.parse(savedCursor)
+        : undefined
+      
+      // Process batches
+      for await (const { data, ctx } of read(cursor)) {
+        // Call user's handler
+        await options.onData({ client, data })
+        
+        // Save cursor
+        await client.set('sqd:cursor', JSON.stringify(ctx.state.current))
+      }
+      
+      // Cleanup
+      await client.disconnect()
+    },
+    // Redis doesn't need fork handling (ephemeral data)
+  })
+}
+```
+
+### Using the Redis Target
+
+```typescript
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      events: { transfers: commonAbis.erc20.events.Transfer },
+    }),
+  )
+  .pipeTo(
+    redisTarget({
+      url: 'redis://localhost:6379',
+      onData: async ({ client, data }) => {
+        // Cache latest transfers by address
+        for (const transfer of data.transfers) {
+          await client.set(
+            `latest:${transfer.event.from}`,
+            JSON.stringify(transfer),
+            { EX: 3600 }, // Expire in 1 hour
+          )
+        }
+      },
+    }),
+  )
+```
+
+## State Management
+
+### Saving State
+
+Always save the cursor after processing each batch:
+
+```typescript
+write: async ({ read, logger }) => {
+  for await (const { data, ctx } of read(cursor)) {
+    // Process data
+    await processData(data)
+    
+    // Save cursor - IMPORTANT!
+    await saveState({
+      blockNumber: ctx.state.current.number,
+      blockHash: ctx.state.current.hash,
+    })
+  }
+}
+```
+
+### Loading State
+
+Load the saved cursor when starting:
+
+```typescript
+write: async ({ read, logger }) => {
+  // Load from your storage
+  const savedState = await db.query(
+    'SELECT block_number, block_hash FROM _sqd_state LIMIT 1'
+  )
+  
+  const cursor: BlockCursor | undefined = savedState
+    ? {
+        number: savedState.block_number,
+        hash: savedState.block_hash,
+      }
+    : undefined
+  
+  // Pass to read() to resume from this point
+  for await (const { data, ctx } of read(cursor)) {
+    // ...
+  }
+}
+```
+
+## Implementing Rollbacks
+
+The `fork` method handles blockchain reorganizations:
+
+```typescript
+fork: async (previousBlocks) => {
+  // previousBlocks contains the fork history
+  // previousBlocks[0] is the most recent valid block
+  const safeCursor = previousBlocks[0]
+  
+  if (!safeCursor) {
+    // No valid blocks found - start from beginning
+    return null
+  }
+  
+  // Revert data to the safe block
+  await db.query(
+    'DELETE FROM my_table WHERE block_number > $1',
+    [safeCursor.number]
+  )
+  
+  // Return the cursor to resume from
+  return safeCursor
+}
+```
+
+### Rollback Strategies
+
+<AccordionGroup>
+  <Accordion title="Delete by block number">
+    Simple and effective for most use cases:
+    
+    ```typescript
+    await db.query(
+      'DELETE FROM transfers WHERE block_number > $1',
+      [safeCursor.number]
+    )
+    ```
+  </Accordion>
+  
+  <Accordion title="Snapshot-based">
+    More complex but handles updates and deletes:
+    
+    ```typescript
+    // Create snapshots before modifications
+    await db.query(`
+      INSERT INTO transfers_snapshots
+      SELECT *, $1 as snapshot_block
+      FROM transfers
+      WHERE block_number > $2
+    `, [currentBlock, safeCursor.number])
+    
+    // On fork, restore from snapshots
+    await db.query(`
+      DELETE FROM transfers WHERE block_number > $1;
+      INSERT INTO transfers
+      SELECT * FROM transfers_snapshots
+      WHERE snapshot_block <= $1
+    `, [safeCursor.number])
+    ```
+  </Accordion>
+  
+  <Accordion title="Event sourcing">
+    Keep an append-only log of all changes:
+    
+    ```typescript
+    // Never delete, just mark as invalidated
+    await db.query(`
+      UPDATE event_log
+      SET invalidated = true
+      WHERE block_number > $1
+    `, [safeCursor.number])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always save state after processing">
+    Save the cursor after each batch to enable resuming:
+    
+    ```typescript
+    for await (const { data, ctx } of read(cursor)) {
+      await processData(data)
+      await saveState(ctx.state.current) // Don't forget!
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Use transactions when possible">
+    Ensure data and state are saved atomically:
+    
+    ```typescript
+    await db.transaction(async (tx) => {
+      await tx.insert(table).values(data)
+      await tx.update(stateTable).set({ cursor })
+    })
+    ```
+  </Accordion>
+  
+  <Accordion title="Include block_number in all tables">
+    Makes rollbacks much easier:
+    
+    ```sql
+    CREATE TABLE transfers (
+      block_number BIGINT NOT NULL,
+      -- other columns
+    )
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle errors gracefully">
+    Wrap operations in try-catch and log errors:
+    
+    ```typescript
+    try {
+      await processData(data)
+    } catch (error) {
+      logger.error(`Failed to process batch: ${error}`)
+      throw error // Re-throw to trigger retry
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Use the profiler">
+    Measure performance to identify bottlenecks:
+    
+    ```typescript
+    for await (const { data, ctx } of read(cursor)) {
+      await ctx.profiler.measure('insert data', async () => {
+        await db.insert(table).values(data)
+      })
+      
+      await ctx.profiler.measure('save state', async () => {
+        await saveState(ctx.state.current)
+      })
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing Your Target
+
+Create a simple test to verify your target works:
+
+```typescript
+import { myCustomTarget } from './my-target'
+import { evmPortalSource, evmDecoder } from '@subsquid/pipes/evm'
+
+await evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+})
+  .pipe(
+    evmDecoder({
+      range: { from: 0, to: 100 }, // Test with small range
+      events: {
+        transfers: commonAbis.erc20.events.Transfer,
+      },
+    }),
+  )
+  .pipeTo(
+    myCustomTarget({
+      onData: async ({ data }) => {
+        console.log(`Received ${data.transfers.length} transfers`)
+        // Verify data is received correctly
+      },
+    }),
+  )
+```
+
+## Complete Template
+
+Here's a complete template for a custom target:
+
+```typescript
+import { createTarget, type BlockCursor, type Ctx, type Logger } from '@subsquid/pipes/core'
+
+export type MyTargetOptions<T> = {
+  // Your configuration
+  connectionString: string
+  onStart?: () => Promise<void>
+  onData: (data: T, ctx: Ctx) => Promise<void>
+  onRollback?: (safeCursor: BlockCursor) => Promise<void>
+}
+
+export function myTarget<T>(options: MyTargetOptions<T>) {
+  // Your state
+  let connection: any
+  
+  return createTarget<T>({
+    write: async ({ read, logger }) => {
+      // 1. Initialize
+      connection = await connect(options.connectionString)
+      logger.info('Connected to database')
+      
+      // 2. Setup (optional)
+      await options.onStart?.()
+      
+      // 3. Load saved state
+      const savedCursor = await loadCursor(connection)
+      
+      // 4. Process batches
+      for await (const { data, ctx } of read(savedCursor)) {
+        try {
+          // 5. Process data
+          await ctx.profiler.measure('process data', async () => {
+            await options.onData(data, ctx)
+          })
+          
+          // 6. Save state
+          await ctx.profiler.measure('save state', async () => {
+            await saveCursor(connection, ctx.state.current)
+          })
+          
+          logger.debug(`Processed block ${ctx.state.current.number}`)
+        } catch (error) {
+          logger.error(`Error processing batch: ${error}`)
+          throw error
+        }
+      }
+      
+      // 7. Cleanup
+      await connection.close()
+    },
+    fork: async (previousBlocks) => {
+      const safeCursor = previousBlocks[0]
+      if (!safeCursor) return null
+      
+      logger.warn(`Fork detected at block ${safeCursor.number}`)
+      
+      // Handle rollback
+      if (options.onRollback) {
+        await options.onRollback(safeCursor)
+      }
+      
+      return safeCursor
+    },
+  })
+}
+
+// Helper functions
+async function loadCursor(connection: any): Promise<BlockCursor | undefined> {
+  // Load from your storage
+  return undefined
+}
+
+async function saveCursor(connection: any, cursor: BlockCursor): Promise<void> {
+  // Save to your storage
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="ClickHouse Target" icon="database" href="/targets/clickhouse">
+    See a real implementation example
+  </Card>
+  <Card title="Drizzle Target" icon="elephant" href="/targets/drizzle">
+    Learn from the automatic rollback implementation
+  </Card>
+</CardGroup>

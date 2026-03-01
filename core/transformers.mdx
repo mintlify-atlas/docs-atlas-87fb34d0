@@ -1,0 +1,674 @@
+---
+title: Transformers
+description: Transform and process blockchain data with composable transformers
+---
+
+## Overview
+
+Transformers are the data processing units in Subsquid Pipes. They transform, filter, decode, and enrich blockchain data as it flows through the pipeline. Transformers are **composable**, **type-safe**, and support **lifecycle hooks** for complex processing logic.
+
+## Creating Transformers
+
+There are three ways to create transformers:
+
+### 1. Inline Transform Function
+
+Simplest form for quick transformations:
+
+```typescript
+source.pipe((data) => {
+  return {
+    blockCount: data.blocks.length,
+    hashes: data.blocks.map(b => b.header.hash)
+  }
+})
+```
+
+### 2. Transformer Options Object
+
+Provides lifecycle hooks and configuration:
+
+```typescript
+source.pipe({
+  profiler: { id: 'my-transformer' },
+  
+  start: async (ctx) => {
+    console.log('Transformer starting...', ctx.state.initial)
+  },
+  
+  transform: (data, ctx) => {
+    const filtered = data.blocks.filter(b => b.header.number > 1000)
+    return { blocks: filtered }
+  },
+  
+  stop: async (ctx) => {
+    console.log('Transformer stopped')
+  }
+})
+```
+
+### 3. Transformer Class
+
+For reusable, testable transformers:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+
+const blockFilter = createTransformer<RawBlocks, FilteredBlocks>({
+  profiler: { id: 'block-filter' },
+  transform: (data) => ({
+    blocks: data.blocks.filter(b => b.header.number > 1000)
+  })
+})
+
+source.pipe(blockFilter)
+```
+
+## Transformer Options
+
+**Type definition from source:**
+```typescript
+// transformer.ts:17-24
+interface TransformerOptions<In, Out, Query = any> {
+  profiler?: ProfilerOptions
+  query?: (ctx: QueryCtx<Query>) => void | Promise<void>
+  start?: (ctx: StartCtx) => Promise<void> | void
+  transform: (data: In, ctx: BatchCtx) => Promise<Out> | Out
+  fork?: (cursor: BlockCursor, ctx: Ctx) => Promise<void> | void
+  stop?: (ctx: StopCtx) => Promise<void> | void
+}
+```
+
+### transform (required)
+
+The core transformation function:
+
+```typescript
+{
+  transform: (data, ctx) => {
+    // data: input from previous stage
+    // ctx: batch context with metadata
+    return processedData
+  }
+}
+```
+
+Can be async:
+
+```typescript
+{
+  transform: async (data, ctx) => {
+    const enriched = await fetchExternalData(data)
+    return enriched
+  }
+}
+```
+
+### profiler (optional)
+
+Enables performance tracking:
+
+```typescript
+{
+  profiler: { id: 'my-operation' },
+  transform: (data, ctx) => {
+    const span = ctx.profiler.start('nested-operation')
+    // ... work ...
+    span.end()
+    return data
+  }
+}
+```
+
+### start (optional)
+
+Called once before streaming begins:
+
+```typescript
+{
+  start: async (ctx) => {
+    // Initialize connections, load state, etc.
+    console.log('Starting from block:', ctx.state.current?.number || ctx.state.initial)
+    
+    // Access to metrics
+    ctx.metrics.counter('transformer_starts').inc()
+  }
+}
+```
+
+**Context type:**
+```typescript
+// transformer.ts:8-12
+type StartCtx = {
+  state: { current?: BlockCursor; initial: number }
+  logger: Logger
+  metrics: Metrics
+}
+```
+
+### stop (optional)
+
+Called once after streaming ends:
+
+```typescript
+{
+  stop: async (ctx) => {
+    // Cleanup, close connections, flush buffers
+    ctx.logger.info('Transformer stopped')
+  }
+}
+```
+
+### fork (optional)
+
+Called when a blockchain fork is detected:
+
+```typescript
+{
+  fork: async (cursor, ctx) => {
+    // Rollback state to cursor block
+    ctx.logger.warn(`Rolling back to block ${cursor.number}`)
+    await rollbackInternalState(cursor)
+  }
+}
+```
+
+See [Fork Handling](/core/fork-handling) for details.
+
+### query (optional)
+
+Modify the Portal query before streaming starts:
+
+```typescript
+{
+  query: (ctx) => {
+    // Add fields needed by this transformer
+    ctx.queryBuilder.addFields({
+      block: { timestamp: true },
+      log: { transactionHash: true }
+    })
+  }
+}
+```
+
+## Chaining Transformers
+
+Transformers can be chained using `.pipe()`:
+
+```typescript
+import { evmPortalSource, evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+
+evmPortalSource({ portal: '...' })
+  .pipe(evmDecoder({
+    events: {
+      transfers: commonAbis.erc20.events.Transfer
+    }
+  }))
+  .pipe((data) => {
+    // Filter large transfers
+    return {
+      largeTransfers: data.transfers.filter(t => 
+        BigInt(t.value) > 10n ** 18n
+      )
+    }
+  })
+  .pipe((data) => {
+    // Group by token
+    const byToken = new Map()
+    for (const t of data.largeTransfers) {
+      if (!byToken.has(t.address)) {
+        byToken.set(t.address, [])
+      }
+      byToken.get(t.address).push(t)
+    }
+    return { byToken }
+  })
+```
+
+### Type Safety
+
+The output type of one transformer becomes the input type of the next:
+
+```typescript
+const t1 = createTransformer<string[], number>({
+  transform: (data) => data.length
+})
+
+const t2 = createTransformer<number, string>({
+  transform: (data) => `Count: ${data}`
+})
+
+const pipeline = source.pipe(t1).pipe(t2)
+// Type: PortalSource<Query, string>
+```
+
+**From source code:**
+```typescript
+// transformer.ts:114-129
+pipe<Res>(
+  transformer:
+    | Transformer<Out, Res, Query>
+    | TransformerOptions<Out, Res, Query>
+    | TransformerOptions<Out, Res, Query>['transform']
+): Transformer<In, Res, Query>
+```
+
+## Nested Transformers
+
+Transformers can contain child transformers:
+
+```typescript
+const parent = createTransformer({
+  profiler: { id: 'parent' },
+  transform: (data) => processParent(data)
+})
+
+const child = createTransformer({
+  profiler: { id: 'child' },
+  transform: (data) => processChild(data)
+})
+
+parent.pipe(child)
+
+// When used, child runs within parent's profiler span
+source.pipe(parent)
+```
+
+**From source code:**
+```typescript
+// transformer.ts:67-83
+async transform(data: In, ctx: BatchCtx): Promise<Out> {
+  const span = ctx.profiler.start(this.options.profiler?.id || 'anonymous')
+  let res = await this.options.transform(data, { ...ctx, profiler: span })
+  span.addTransformerExemplar(res)
+
+  if (this.children.length === 0) {
+    span.end()
+    return res
+  }
+
+  for (const child of this.children) {
+    res = await child.transform(res, { ...ctx, profiler: span })
+  }
+
+  span.end()
+  return res
+}
+```
+
+## Composite Transformers
+
+Run multiple transformers in parallel and merge outputs:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+
+const counter = createTransformer({
+  profiler: { id: 'counter' },
+  transform: (data) => data.blocks.length
+})
+
+const hasher = createTransformer({
+  profiler: { id: 'hasher' },
+  transform: (data) => data.blocks.map(b => b.header.hash)
+})
+
+const timestamps = createTransformer({
+  profiler: { id: 'timestamps' },
+  transform: (data) => data.blocks.map(b => b.header.timestamp)
+})
+
+source.pipeComposite({
+  count: counter,
+  hashes: hasher,
+  times: timestamps
+})
+
+// Output type: { count: number, hashes: string[], times: number[] }
+```
+
+**Type definition from source:**
+```typescript
+// composite-transformer.ts:5-7
+type CompositePipe<T extends Record<string, Transformer<any, any>>> = {
+  [K in keyof T]: T[K] extends Transformer<any, infer Out> ? Out : never
+}
+```
+
+### How It Works
+
+Each transformer receives the same input and runs independently:
+
+```typescript
+// composite-transformer.ts:62-68
+transform: async (data, ctx) => {
+  const res = data as any
+  for (const key in composite) {
+    res[key] = await composite[key].transform(data, ctx)
+  }
+  return res
+}
+```
+
+## Stateful Transformers
+
+Maintain state across batches:
+
+```typescript
+let totalProcessed = 0
+
+const statefulTransformer = createTransformer({
+  profiler: { id: 'stateful' },
+  
+  start: async (ctx) => {
+    // Initialize or restore state
+    totalProcessed = await loadState() || 0
+  },
+  
+  transform: (data) => {
+    totalProcessed += data.blocks.length
+    return {
+      ...data,
+      totalProcessed
+    }
+  },
+  
+  fork: async (cursor, ctx) => {
+    // Rollback state
+    totalProcessed = await loadStateAtBlock(cursor.number)
+  },
+  
+  stop: async (ctx) => {
+    // Persist final state
+    await saveState(totalProcessed)
+  }
+})
+```
+
+<Warning>
+Stateful transformers must implement the `fork` hook to correctly handle blockchain reorganizations.
+</Warning>
+
+## Context Usage
+
+Every transform receives a context object:
+
+```typescript
+{
+  transform: (data, ctx) => {
+    // Logging
+    ctx.logger.info('Processing batch')
+    ctx.logger.debug({ blockCount: data.blocks.length })
+    
+    // Profiling
+    const span = ctx.profiler.start('expensive-operation')
+    doWork()
+    span.end()
+    
+    // Metrics
+    ctx.metrics.counter('blocks_processed').inc(data.blocks.length)
+    
+    // State tracking
+    console.log('Current block:', ctx.state.current.number)
+    console.log('Progress:', ctx.state.progress?.percent, '%')
+    
+    // Chain info
+    if (ctx.head.finalized) {
+      console.log('Finalized:', ctx.head.finalized.number)
+    }
+    
+    return data
+  }
+}
+```
+
+## Built-in Transformers
+
+### EVM Decoder
+
+Decode EVM events and functions:
+
+```typescript
+import { evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+
+source.pipe(
+  evmDecoder({
+    events: {
+      transfers: commonAbis.erc20.events.Transfer,
+      approvals: commonAbis.erc20.events.Approval
+    },
+    functions: {
+      swaps: uniswapAbi.functions.swap
+    }
+  })
+)
+
+// Output: { transfers: [...], approvals: [...], swaps: [...] }
+```
+
+### Solana Instruction Decoder
+
+```typescript
+import { solanaDecoder } from '@subsquid/pipes/solana'
+
+source.pipe(
+  solanaDecoder({
+    instructions: {
+      transfers: tokenProgramAbi.instructions.transfer
+    }
+  })
+)
+```
+
+## Testing Transformers
+
+Transformers are easy to test in isolation:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+import { describe, it, expect } from 'vitest'
+
+const myTransformer = createTransformer<Input, Output>({
+  transform: (data) => ({
+    processed: data.raw.map(x => x * 2)
+  })
+})
+
+describe('myTransformer', () => {
+  it('doubles input values', async () => {
+    const input = { raw: [1, 2, 3] }
+    const mockCtx = createMockContext()
+    
+    const result = await myTransformer.transform(input, mockCtx)
+    
+    expect(result.processed).toEqual([2, 4, 6])
+  })
+})
+```
+
+## Performance Optimization
+
+### Profiling
+
+Identify bottlenecks with profiler IDs:
+
+```typescript
+source
+  .pipe({ 
+    profiler: { id: 'decode' },
+    transform: (data) => decode(data)
+  })
+  .pipe({ 
+    profiler: { id: 'filter' },
+    transform: (data) => filter(data)
+  })
+  .pipe({ 
+    profiler: { id: 'enrich' },
+    transform: async (data) => await enrich(data)
+  })
+
+// Profiler output shows timing for each stage
+```
+
+### Batching
+
+Process multiple items together:
+
+```typescript
+{
+  transform: (data) => {
+    // Process all transfers at once
+    const addresses = data.transfers.map(t => t.to)
+    const balances = await fetchBalances(addresses) // Batch RPC call
+    
+    return data.transfers.map((t, i) => ({
+      ...t,
+      balance: balances[i]
+    }))
+  }
+}
+```
+
+### Caching
+
+Cache expensive computations:
+
+```typescript
+const cache = new Map()
+
+{
+  transform: (data) => {
+    return data.items.map(item => {
+      if (cache.has(item.id)) {
+        return cache.get(item.id)
+      }
+      
+      const processed = expensiveOperation(item)
+      cache.set(item.id, processed)
+      return processed
+    })
+  },
+  
+  fork: async (cursor) => {
+    // Clear cache on rollback
+    cache.clear()
+  }
+}
+```
+
+## Best Practices
+
+### Do's
+
+- Keep transformers focused on a single responsibility
+- Use meaningful profiler IDs for debugging
+- Implement `fork` hook for stateful transformers
+- Return new objects instead of mutating input
+- Use TypeScript generics for type safety
+
+```typescript
+// Good: Type-safe and focused
+const filterLarge = createTransformer<Transfers, LargeTransfers>({
+  profiler: { id: 'filter-large-transfers' },
+  transform: (data) => ({
+    transfers: data.transfers.filter(t => BigInt(t.value) > 10n ** 18n)
+  })
+})
+```
+
+### Don'ts
+
+- Don't mutate input data
+- Don't use transformers for side effects (use targets instead)
+- Don't ignore fork handling for stateful logic
+- Don't make blocking I/O calls without batching
+
+```typescript
+// Bad: Mutating input
+{
+  transform: (data) => {
+    data.blocks.forEach(b => b.processed = true) // ❌ Don't mutate
+    return data
+  }
+}
+
+// Good: Return new objects
+{
+  transform: (data) => ({
+    blocks: data.blocks.map(b => ({ ...b, processed: true })) // ✅ New object
+  })
+}
+```
+
+## Advanced Patterns
+
+### Conditional Transformers
+
+```typescript
+const conditionalTransformer = createTransformer({
+  transform: (data, ctx) => {
+    // Only process recent blocks
+    if (ctx.state.current.number < 18_000_000) {
+      return data
+    }
+    
+    return processData(data)
+  }
+})
+```
+
+### Multi-stage Processing
+
+```typescript
+const multiStage = createTransformer({
+  profiler: { id: 'multi-stage' },
+  transform: (data, ctx) => {
+    const stage1 = ctx.profiler.start('stage-1')
+    const decoded = decode(data)
+    stage1.end()
+    
+    const stage2 = ctx.profiler.start('stage-2')
+    const filtered = filter(decoded)
+    stage2.end()
+    
+    const stage3 = ctx.profiler.start('stage-3')
+    const enriched = enrich(filtered)
+    stage3.end()
+    
+    return enriched
+  }
+})
+```
+
+### Error Handling
+
+```typescript
+const resilientTransformer = createTransformer({
+  transform: (data, ctx) => {
+    try {
+      return riskyOperation(data)
+    } catch (error) {
+      ctx.logger.error({ error }, 'Transform failed')
+      // Return partial data or skip
+      return { items: [] }
+    }
+  }
+})
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Targets" icon="floppy-disk" href="/core/targets">
+    Persist transformed data
+  </Card>
+  <Card title="Fork Handling" icon="code-fork" href="/core/fork-handling">
+    Handle blockchain reorganizations
+  </Card>
+  <Card title="EVM Decoder" icon="ethereum" href="/evm/decoder">
+    Decode EVM events and functions
+  </Card>
+  <Card title="Pipelines" icon="diagram-project" href="/core/pipelines">
+    Build complete pipelines
+  </Card>
+</CardGroup>

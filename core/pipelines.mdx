@@ -1,0 +1,352 @@
+---
+title: Pipelines
+description: Build composable data pipelines with pipe() composition
+---
+
+## Overview
+
+Subsquid Pipes uses a **pipeline-based architecture** where data flows through composable stages: sources, transformers, and targets. Each stage processes and passes data to the next, creating a clean and type-safe data processing chain.
+
+## Pipeline Architecture
+
+A typical pipeline consists of three main components:
+
+1. **Source** - Fetches blockchain data from Portal
+2. **Transformers** - Process and transform the data (zero or more)
+3. **Target** - Persists the processed data
+
+```typescript
+source
+  .pipe(transformer1)
+  .pipe(transformer2)
+  .pipeTo(target)
+```
+
+## Basic Pipeline
+
+Here's a minimal example that streams EVM blocks:
+
+```typescript
+import { evmPortalSource } from '@subsquid/pipes/evm'
+import { createTarget } from '@subsquid/pipes/core'
+
+const source = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  query: { from: 0, to: 1000 }
+})
+
+// Iterate over batches
+for await (const { data, ctx } of source) {
+  console.log(`Received ${data.blocks.length} blocks`)
+  console.log(`Current block: ${ctx.state.current.number}`)
+}
+```
+
+## The pipe() Method
+
+The `pipe()` method chains transformers together. It accepts three forms:
+
+### 1. Transform Function
+
+Simplest form - just provide the transformation logic:
+
+```typescript
+source.pipe((data) => {
+  return {
+    blockCount: data.blocks.length,
+    blocks: data.blocks
+  }
+})
+```
+
+**Type signature from source:**
+```typescript
+// portal-source.ts:260-275
+pipe<Out>(
+  transformerOrOptions:
+    | TransformerOptions<T, Out, Q>['transform']
+    | TransformerOptions<T, Out, Q>
+    | Transformer<T, Out, Q>
+): PortalSource<Q, Out>
+```
+
+### 2. Transformer Options
+
+Provides more control with lifecycle hooks and profiling:
+
+```typescript
+source.pipe({
+  profiler: { id: 'my-transformer' },
+  start: async (ctx) => {
+    console.log('Transformer starting...')
+  },
+  transform: (data, ctx) => {
+    return data.blocks.filter(b => b.header.number > 1000)
+  },
+  stop: async (ctx) => {
+    console.log('Transformer stopped')
+  }
+})
+```
+
+### 3. Transformer Instance
+
+Use a custom transformer class for complex logic:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+
+const myTransformer = createTransformer({
+  profiler: { id: 'custom' },
+  transform: (data) => ({ processed: data })
+})
+
+source.pipe(myTransformer)
+```
+
+## Chaining Multiple Transformers
+
+Transformers can be chained to build complex data pipelines:
+
+```typescript
+import { evmPortalSource, evmDecoder, commonAbis } from '@subsquid/pipes/evm'
+
+evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet'
+})
+  .pipe(evmDecoder({
+    events: {
+      transfers: commonAbis.erc20.events.Transfer
+    }
+  }))
+  .pipe((data) => {
+    // Filter large transfers
+    return {
+      largeTransfers: data.transfers.filter(t => 
+        BigInt(t.value) > 1000000000000000000n
+      )
+    }
+  })
+  .pipe((data) => {
+    // Aggregate by recipient
+    const byRecipient = new Map()
+    for (const transfer of data.largeTransfers) {
+      const current = byRecipient.get(transfer.to) || 0n
+      byRecipient.set(transfer.to, current + BigInt(transfer.value))
+    }
+    return { aggregated: byRecipient }
+  })
+```
+
+## Composite Pipelines
+
+Run multiple transformers in parallel and merge their outputs:
+
+```typescript
+import { createTransformer } from '@subsquid/pipes/core'
+
+const countTransformer = createTransformer({
+  profiler: { id: 'counter' },
+  transform: (data) => data.blocks.length
+})
+
+const hashesTransformer = createTransformer({
+  profiler: { id: 'hashes' },
+  transform: (data) => data.blocks.map(b => b.header.hash)
+})
+
+source.pipeComposite({
+  count: countTransformer,
+  hashes: hashesTransformer
+})
+
+// Output type: { count: number, hashes: string[] }
+```
+
+**Type signature from source:**
+```typescript
+// portal-source.ts:307-311
+pipeComposite<Arg extends Record<string, Transformer<any, any>>>(
+  composite: Arg
+): PortalSource<Q, CompositePipe<Arg>>
+
+// CompositePipe type extracts output types
+type CompositePipe<T extends Record<string, Transformer<any, any>>> = {
+  [K in keyof T]: T[K] extends Transformer<any, infer Out> ? Out : never
+}
+```
+
+## Batch Context
+
+Every batch provides a context object with metadata and utilities:
+
+```typescript
+for await (const { data, ctx } of source) {
+  // Current processing state
+  console.log(ctx.state.current)      // Current block cursor
+  console.log(ctx.state.initial)      // Starting block number
+  console.log(ctx.state.last)         // Last block in range
+  console.log(ctx.state.rollbackChain) // Unfinalized blocks for fork handling
+  
+  // Chain head information
+  console.log(ctx.head.finalized)     // Latest finalized block
+  console.log(ctx.head.latest)        // Latest known block
+  
+  // Batch metadata
+  console.log(ctx.meta.bytesSize)     // Batch size in bytes
+  console.log(ctx.meta.requests)      // Request count by status code
+  console.log(ctx.meta.lastBlockReceivedAt) // Timestamp
+  
+  // Utilities
+  ctx.logger.info('Processing batch')
+  const span = ctx.profiler.start('custom-operation')
+  // ... do work ...
+  span.end()
+}
+```
+
+**Type definition from source:**
+```typescript
+// portal-source.ts:35-66
+type BatchCtx = {
+  head: {
+    finalized?: BlockCursor
+    latest?: BlockCursor
+  }
+  state: {
+    initial: number
+    last: number
+    current: BlockCursor
+    rollbackChain: BlockCursor[]
+    progress?: ProgressState
+  }
+  meta: {
+    bytesSize: number
+    requests: Record<number, number>
+    lastBlockReceivedAt: Date
+  }
+  query: { url: string; hash: string; raw: any }
+  profiler: Profiler
+  metrics: Metrics
+  logger: Logger
+}
+
+type PortalBatch<T = any> = { data: T; ctx: BatchCtx }
+```
+
+## Pipeline Termination
+
+Pipelines can be consumed in two ways:
+
+### 1. Async Iteration (Manual)
+
+```typescript
+const pipeline = source.pipe(transformer)
+
+for await (const batch of pipeline) {
+  // Process batch manually
+  await processData(batch.data)
+}
+```
+
+### 2. Target (Automatic)
+
+```typescript
+import { createTarget } from '@subsquid/pipes/core'
+
+const target = createTarget({
+  write: async ({ read, logger }) => {
+    for await (const batch of read()) {
+      // Process and persist data
+      await saveToDatabase(batch.data)
+    }
+  }
+})
+
+await source.pipe(transformer).pipeTo(target)
+```
+
+<Note>
+Using `.pipeTo(target)` is the recommended approach as it handles lifecycle management, fork handling, and error recovery automatically.
+</Note>
+
+## Profiling Pipelines
+
+Enable profiling to measure performance:
+
+```typescript
+const source = evmPortalSource({
+  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  profiler: true // Automatically enabled in development
+})
+
+source.pipe({
+  profiler: { id: 'expensive-operation' },
+  transform: (data, ctx) => {
+    const span = ctx.profiler.start('nested-operation')
+    // ... work ...
+    span.end()
+    return data
+  }
+})
+```
+
+## Best Practices
+
+<Warning>
+**Pipeline Immutability**: Each `.pipe()` call creates a new pipeline instance. The original source remains unchanged and can be reused.
+</Warning>
+
+### Do's
+
+- Keep transformers focused on a single responsibility
+- Use profiler IDs for meaningful performance tracking
+- Handle errors gracefully in transform functions
+- Use TypeScript generics for type-safe transformations
+
+```typescript
+// Good: Type-safe transformer
+const typed = createTransformer<RawBlocks, ProcessedData>({
+  transform: (data) => processBlocks(data)
+})
+```
+
+### Don'ts
+
+- Don't call `.pipe()` after `.pipeTo()` - the source is closed
+- Don't mutate input data - return new objects
+- Don't use `.pipe()` for side effects - use lifecycle hooks instead
+
+```typescript
+// Bad: Side effects in transform
+source.pipe((data) => {
+  saveToDatabase(data) // ❌ Don't do this
+  return data
+})
+
+// Good: Use target for persistence
+source.pipeTo(createTarget({
+  write: async ({ read }) => {
+    for await (const { data } of read()) {
+      await saveToDatabase(data) // ✅ Correct
+    }
+  }
+}))
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Sources" icon="database" href="/core/sources">
+    Learn about Portal sources and data streaming
+  </Card>
+  <Card title="Transformers" icon="arrows-rotate" href="/core/transformers">
+    Deep dive into data transformation
+  </Card>
+  <Card title="Targets" icon="floppy-disk" href="/core/targets">
+    Persist data with built-in or custom targets
+  </Card>
+  <Card title="Fork Handling" icon="code-fork" href="/core/fork-handling">
+    Handle blockchain reorganizations
+  </Card>
+</CardGroup>
